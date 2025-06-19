@@ -10,7 +10,7 @@ from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel
 
 # FastAPI App Initialization
-app = FastAPI(title="Agile Arena Bosch Chatbot API", version="3.10") # Version updated for new cancel/view logic
+app = FastAPI(title="Agile Arena Bosch Chatbot API", version="3.14") # Version updated for prompt fix
 
 app.add_middleware(
     CORSMiddleware,
@@ -89,17 +89,30 @@ BOOKING_INFO_FIELDS = ["booking_days_description"]
 CANCEL_INFO_FIELDS = ["cancel_seat_number", "cancel_date_description"]
 # Fields for view history intent
 VIEW_HISTORY_FIELDS = ["history_count"]
-
 RESET_COMMANDS = ["clear", "reset", "start over", "start", "new booking"]
 GREETING_COMMANDS = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
 
 # --- Date Helper Functions (assumed correct from provided code) ---
-def format_dates_for_display(dates: List[datetime]) -> str:
+def format_dates_for_display(dates: List[Any]) -> str:
     if not dates: return "No dates specified"
-    dates = sorted(list(set(dates)))
-    display_format_dates = [d.strftime('%B %d, %Y') for d in dates]
-    if len(dates) == 1: return f"Single day: {display_format_dates[0]}"
-    return f"Multiple days ({len(dates)}): {', '.join(display_format_dates)}"
+    
+    # Handle both datetime objects and ISO date strings
+    date_objects = []
+    for d in dates:
+        if isinstance(d, str):
+            try:
+                date_objects.append(datetime.fromisoformat(d.split('T')[0]))
+            except ValueError:
+                continue # Skip if string is not a valid date format
+        elif isinstance(d, datetime):
+            date_objects.append(d)
+
+    if not date_objects: return "Invalid date format provided"
+
+    date_objects = sorted(list(set(date_objects)))
+    display_format_dates = [d.strftime('%B %d, %Y') for d in date_objects]
+    if len(date_objects) == 1: return f"Single day: {display_format_dates[0]}"
+    return f"Multiple days ({len(date_objects)}): {', '.join(display_format_dates)}"
 
 def format_date_for_table(date_obj: datetime) -> str:
     return date_obj.strftime('%d.%b.%Y')
@@ -437,177 +450,110 @@ def check_seat_availability(booking_info, seat_number):
                                     workspace_id=str(workspace.get('workspaceId', '')), status_name=workspace.get('statusName', ''))
     return SeatAvailability(seat_number=seat_number, is_available=False, workspace_id="", status_name="Seat not found")
 
-async def extract_info_with_llm(message: str, current_info: Dict[str, Any]) -> Dict[str, Any]:
-    info_to_extract_booking = {
-        "booking_days_description": "Textual description of days for booking (e.g., 'today and next 3 days', '13th May, 14th, 15th, 16th May', 'Monday to Wednesday').",
-        "building_no": "Building number (e.g., '903').",
-        "floor": "Floor (e.g., 'Floor 1', '2nd floor').",
-        "seat_number": "Seat number (e.g., 'L1-001')."
-    }
-    info_to_extract_cancel = {
-        "cancel_seat_number": "The seat number of the booking to cancel (e.g., 'L1-001').",
-        "cancel_date_description": "Textual description of the date of the booking to cancel (e.g., 'tomorrow', 'July 25th'). This should resolve to a single date."
-    }
-    info_to_extract_view_history = {
-        "history_count": "Number of booking entries to show (e.g., '2', 'last 3'). If not specified, do not include this field."
-    }
 
-    system_content = f"""
-You are an information extraction system. Your primary goal is to understand the user's INTENT and then extract relevant details.
-User's message: "{message}"
-Current collected information (excluding sensitive/large lists): {json.dumps({k: v for k, v in current_info.items() if k not in ['cancellable_bookings_cache', 'booking_history_cache']})}
-
-Intents to identify:
-- book_seat: User wants to reserve a new seat.
-- cancel_seat: User wants to cancel an existing booking.
-- view_booking_history: User wants to see their booking history.
-- general_query: User is asking a question or making a statement not directly related to booking, cancelling, or viewing history.
-
-If intent is 'book_seat', extract these details if mentioned in the user's *current* message (do NOT ask for booking time):
-"""
-    for key, desc in info_to_extract_booking.items():
-        system_content += f"- {key}: {desc}\n"
-
-    system_content += """
-If intent is 'cancel_seat':
-  - If the user provides a specific seat AND a single date/day for cancellation (e.g., "cancel my booking for L1-001 on July 20th", "cancel S001 for tomorrow"), extract:
-"""
-    for key, desc in info_to_extract_cancel.items():
-        system_content += f"    - {key}: {desc}\n"
-    system_content += """  - Do NOT ask for how many days to cancel. Cancellation is for a single specified day.
-  - If the user says "cancel my booking" without specifics, do not extract these cancel-specific fields; the system will handle it by listing bookings.
-
-If intent is 'view_booking_history', extract this detail if mentioned:
-"""
-    for key, desc in info_to_extract_view_history.items():
-        system_content += f"- {key}: {desc}\n"
-
-    system_content += """
-Return ONLY a JSON object.
-- The JSON object *must* include an "intent" field.
-- If a booking, cancellation, or history field is already in 'current_info' and the user's message doesn't provide a new value, do NOT include it in the JSON.
-- Output a minimal JSON with only newly extracted/updated values for the identified intent, and the determined intent.
-- Normalize extracted values: building "building 903" -> "903", floor "1st floor" -> "1st floor", seat "seat L028" -> "L028".
-
-Example (Booking):
-User: "I'd like to book for Monday to Wednesday in building 903."
-JSON: {"intent": "book_seat", "booking_days_description": "Monday to Wednesday", "building_no": "903"}
-
-Example (Specific Cancellation):
-User: "Cancel my booking for seat S007 on August 1st."
-JSON: {"intent": "cancel_seat", "cancel_seat_number": "S007", "cancel_date_description": "August 1st"}
-
-Example (General Cancellation):
-User: "Please cancel my reservation."
-JSON: {"intent": "cancel_seat"}
-
-Example (View History):
-User: "Show my last 2 bookings."
-JSON: {"intent": "view_booking_history", "history_count": "2"}
-
-Example (General Query):
-User: "What time do bookings close?"
-JSON: {"intent": "general_query"}
-"""
-    updated_extraction_info = current_info.copy()
-    try:
-        messages = [ SystemMessage(content=system_content), HumanMessage(content="Extract information based on my previous message and the rules provided.") ]
-        response_llm = llm.invoke(messages)
-        extracted_json_str = response_llm.content.strip()
-        match = re.search(r"\{.*\}", extracted_json_str, re.DOTALL)
-        if match: extracted_json_str = match.group(0)
-        
+def parse_dates_fallback(message: str, today_iso_date: str) -> List[str]:
+    """
+    Fallback date parser for common patterns when LLM fails
+    """
+    dates = []
+    today_date = datetime.strptime(today_iso_date, "%Y-%m-%d")
+    current_year = today_date.year
+    
+    message_lower = message.lower()
+    
+    # Handle date ranges like "9th june - 12th june" or "june 9 - june 12"
+    date_range_pattern = r'(\d{1,2})(?:th|st|nd|rd)?\s+(\w+)\s*[-–—to]\s*(\d{1,2})(?:th|st|nd|rd)?\s+(\w+)'
+    range_match = re.search(date_range_pattern, message_lower)
+    
+    if range_match:
+        start_day, start_month, end_day, end_month = range_match.groups()
         try:
-            extracted_data = json.loads(extracted_json_str)
-            print(f"LLM Extracted JSON: {extracted_data}")
-            if "intent" in extracted_data:
-                updated_extraction_info["intent"] = extracted_data["intent"]
+            # Parse start and end dates
+            start_date = parse_date_string(f"{start_day} {start_month} {current_year}")
+            end_date = parse_date_string(f"{end_day} {end_month} {current_year}")
             
-            all_possible_fields = BOOKING_INFO_FIELDS + LOCATION_FIELDS + CANCEL_INFO_FIELDS + VIEW_HISTORY_FIELDS
-            for field in all_possible_fields:
-                if field in extracted_data and extracted_data[field] is not None:
-                    # Clear related fields if intent changes to avoid stale data issues
-                    if "intent" in extracted_data and updated_extraction_info.get("intent") != current_info.get("intent"):
-                        if field in BOOKING_INFO_FIELDS + LOCATION_FIELDS and extracted_data["intent"] != "book_seat": continue
-                        if field in CANCEL_INFO_FIELDS and extracted_data["intent"] != "cancel_seat": continue
-                        if field in VIEW_HISTORY_FIELDS and extracted_data["intent"] != "view_booking_history": continue
-                    updated_extraction_info[field] = str(extracted_data[field]).strip()
-        except json.JSONDecodeError as e:
-            print(f"JSONDecodeError in extract_info_with_llm: {e}. Raw: {extracted_json_str}")
-            if not updated_extraction_info.get("intent"):
-                if any(kw in message.lower() for kw in ["cancel", "remove my booking", "delete reservation"]):
-                    updated_extraction_info["intent"] = "cancel_seat"
-                elif any(kw in message.lower() for kw in ["show my bookings", "booking history", "my reservations"]):
-                    updated_extraction_info["intent"] = "view_booking_history"
-                elif any(kw in message.lower() for kw in ["book", "reserve", "get a seat"]):
-                     updated_extraction_info["intent"] = "book_seat"
+            if start_date and end_date:
+                # Generate all dates in the range
+                current_date = start_date
+                while current_date <= end_date:
+                    dates.append(current_date.strftime("%Y-%m-%d"))
+                    current_date += timedelta(days=1)
+                return dates
+        except:
+            pass
+    
+    # Handle single date ranges like "9th - 12th june"
+    single_month_range = r'(\d{1,2})(?:th|st|nd|rd)?\s*[-–—to]\s*(\d{1,2})(?:th|st|nd|rd)?\s+(\w+)'
+    single_match = re.search(single_month_range, message_lower)
+    
+    if single_match:
+        start_day, end_day, month = single_match.groups()
+        try:
+            start_date = parse_date_string(f"{start_day} {month} {current_year}")
+            end_date = parse_date_string(f"{end_day} {month} {current_year}")
+            
+            if start_date and end_date:
+                current_date = start_date
+                while current_date <= end_date:
+                    dates.append(current_date.strftime("%Y-%m-%d"))
+                    current_date += timedelta(days=1)
+                return dates
+        except:
+            pass
+    
+    # Handle "today and tomorrow"
+    if "today and tomorrow" in message_lower:
+        dates.append(today_iso_date)
+        dates.append((today_date + timedelta(days=1)).strftime("%Y-%m-%d"))
+    # Handle "tomorrow and day after"
+    elif "tomorrow and day after" in message_lower:
+        dates.append((today_date + timedelta(days=1)).strftime("%Y-%m-%d"))
+        dates.append((today_date + timedelta(days=2)).strftime("%Y-%m-%d"))
+    # Handle "next X days"
+    elif "next" in message_lower and "day" in message_lower:
+        numbers = re.findall(r'\d+', message_lower)
+        if numbers:
+            num_days = int(numbers[0])
+            for i in range(num_days):
+                dates.append((today_date + timedelta(days=i)).strftime("%Y-%m-%d"))
+    # Handle just "today"
+    elif "today" in message_lower and "tomorrow" not in message_lower:
+        dates.append(today_iso_date)
+    # Handle just "tomorrow"
+    elif "tomorrow" in message_lower and "today" not in message_lower:
+        dates.append((today_date + timedelta(days=1)).strftime("%Y-%m-%d"))
+    
+    return dates
 
-        # Regex fallbacks (primarily for booking, can be extended if LLM struggles with cancel/view fields)
-        if updated_extraction_info.get("intent") == "book_seat" or not updated_extraction_info.get("intent"):
-            if "building_no" not in updated_extraction_info or not updated_extraction_info.get("building_no"):
-                b_match = re.search(r"\b(?:building\s*(?:no\.?|number)?\s*)?(\d{3,4})\b", message, re.IGNORECASE)
-                if b_match: updated_extraction_info["building_no"] = b_match.group(1).strip()
-            if "floor" not in updated_extraction_info or not updated_extraction_info.get("floor"):
-                f_match = re.search(r"\b(\d+(?:st|nd|rd|th)?\s*floor|ground\s*floor|floor\s*\d+|G\s*floor)\b", message, re.IGNORECASE)
-                if f_match: updated_extraction_info["floor"] = f_match.group(0).strip()
-            if "seat_number" not in updated_extraction_info or not updated_extraction_info.get("seat_number"): # For booking
-                s_match = re.search(r"\b([A-Z]\d{1,2}-?\d{2,3}|S\d{3,4}|L\d{3})\b", message) # General seat pattern
-                if s_match: updated_extraction_info["seat_number"] = s_match.group(1).strip().upper()
-        
-        # Regex fallback for cancel_seat_number if intent is cancel_seat but LLM missed it
-        if updated_extraction_info.get("intent") == "cancel_seat" and ("cancel_seat_number" not in updated_extraction_info or not updated_extraction_info.get("cancel_seat_number")):
-            s_match = re.search(r"\b(?:seat\s*)?([A-Z]\d{1,2}-?\d{2,3}|S\d{3,4}|L\d{3})\b", message, re.IGNORECASE)
-            if s_match: updated_extraction_info["cancel_seat_number"] = s_match.group(1).strip().upper()
-
-        print(f"Info after LLM + fallbacks: {updated_extraction_info}")
-        return updated_extraction_info
-    except Exception as e:
-        print(f"Error in extract_info_with_llm: {e}")
-        return current_info
-
-async def get_llm_response_for_booking(message: str, conversation_history: List[Dict[str, str]], collected_info: Dict[str, Any]):
-    system_prompt_parts = ["You are a helpful assistant for Bosch seat booking."]
-    missing_fields_desc = [] # For human-readable list of missing fields
-    
-    # Define required fields for booking and their user-friendly descriptions
-    required_booking_fields_map = {
-        "booking_days_description": "booking_days_description (e.g., 'today and next 2 days', 'next Monday', '15th July')",
-        "building_no": "building number",
-        "floor": "floor (e.g., 'Floor 1', '2nd floor')",
-        "seat_number": "seat number (e.g., 'L1-001')"
-    }
-    
-    # Check which required fields are missing
-    for field_key, field_desc in required_booking_fields_map.items():
-        if field_key not in collected_info or not collected_info[field_key]:
-            missing_fields_desc.append(field_desc)
-    
-    if missing_fields_desc:
-        system_prompt_parts.append(f"Ask for the first missing detail for booking: {missing_fields_desc[0]}.")
-        if len(missing_fields_desc) > 1:
-            system_prompt_parts.append(f"The other pending fields for booking are: {', '.join(missing_fields_desc[1:])}.")
-    else:
-        system_prompt_parts.append("All required information for booking (days, building, floor, seat number) seems to be collected. You should be preparing a summary.")
-    
-    system_prompt_parts.extend([
-        "Do not ask for employee name or email; they will be fetched automatically from the API.",
-        "Do no show the collected information to the user.",
-        "Do NOT ask for the booking time. The booking will be for the standard working hours (8 AM to 8 PM).",
-        "Focus only on collecting information for seat booking: booking days description, building number, floor, and seat number. Ask only one question at a time. Be friendly but efficient.",
-        "If the user has provided all necessary information for booking, do not ask for it again.",
-        "Do not ask for confirmation to book yet; that will be handled separately.",
-        "Do not show internal API details. Respond concisely."
-    ])
-    system_content = "\n".join(system_prompt_parts)
-    messages = [SystemMessage(content=system_content)]
-    for msg in conversation_history: messages.append(HumanMessage(content=msg["content"]) if msg["role"] == "user" else AIMessage(content=msg["content"]))
-    messages.append(HumanMessage(content=message))
+def parse_date_string(date_str: str) -> Optional[datetime]:
+    """
+    Parse various date string formats into datetime object
+    """
+    from dateutil import parser
     try:
-        response = llm.invoke(messages)
-        return response.content
-    except Exception as e:
-        print(f"LLM error in get_llm_response_for_booking: {e}")
-        raise HTTPException(status_code=500, detail=f"Error calling Azure OpenAI: {str(e)}")
+        return parser.parse(date_str)
+    except:
+        # Fallback manual parsing for common formats
+        months = {
+            'january': 1, 'jan': 1, 'february': 2, 'feb': 2, 'march': 3, 'mar': 3,
+            'april': 4, 'apr': 4, 'may': 5, 'june': 6, 'jun': 6, 'july': 7, 'jul': 7,
+            'august': 8, 'aug': 8, 'september': 9, 'sep': 9, 'october': 10, 'oct': 10,
+            'november': 11, 'nov': 11, 'december': 12, 'dec': 12
+        }
+        
+        parts = date_str.lower().split()
+        if len(parts) >= 3:
+            try:
+                day_str = re.sub(r'(st|nd|rd|th)', '', parts[0])
+                day = int(day_str)
+                month_str = parts[1]
+                year = int(parts[2])
+                month = months.get(month_str)
+                if month:
+                    return datetime(year, month, day)
+            except (ValueError, IndexError):
+                pass
+        return None
 
 def format_booking_results_table(booking_results_list: List[DayBookingStatus], collected_info: Dict[str, Any]) -> str:
     table_header = "| Date | Building | Floor | Seat Number | Status |\n"
@@ -625,11 +571,14 @@ def format_booking_results_table(booking_results_list: List[DayBookingStatus], c
     if collected_info.get("employee_email"): user_details_parts.append(f"({collected_info['employee_email']})")
     return confirmation_table + " ".join(user_details_parts)
 
-async def process_multi_date_booking(employee_id: str, dates_list: List[datetime], collected_info: Dict[str, Any]):
+async def process_multi_date_booking(employee_id: str, dates_list: List[str], collected_info: Dict[str, Any]):
+    # Convert ISO strings to datetime objects
+    dates_to_book_dt = [datetime.fromisoformat(d) for d in dates_list]
+
     multi_day_results: List[DayBookingStatus] = []
     access_token = await get_new_access_token()
     if not access_token:
-        for date_obj in dates_list: multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="System error: Auth token failed."))
+        for date_obj in dates_to_book_dt: multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="System error: Auth token failed."))
         return {"success": False, "booking_results": multi_day_results, "confirmation_table": format_booking_results_table(multi_day_results, collected_info), "message": "System error: Could not get access token."}
 
     # Ensure employee name/email are fresh or fetched if missing, for booking payload
@@ -642,13 +591,13 @@ async def process_multi_date_booking(employee_id: str, dates_list: List[datetime
         if associate_api_info:
             user_data_store[employee_id]["associate_api_data"] = associate_api_info
         else:
-            for date_obj in dates_list: multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="System error: Failed to get associate info."))
+            for date_obj in dates_to_book_dt: multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="System error: Failed to get associate info."))
             return {"success": False, "booking_results": multi_day_results, "confirmation_table": format_booking_results_table(multi_day_results, collected_info), "message": "Failed to retrieve associate information."}
     print("building_no:", collected_info["building_no"],"floor: ", collected_info["floor"])
     unit_id = extract_unit_id(associate_api_info, collected_info["building_no"], collected_info["floor"])
     print("unit_id:", unit_id)  
     if not unit_id:
-        for date_obj in dates_list: multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="Invalid Building/Floor or unit ID not found."))
+        for date_obj in dates_to_book_dt: multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="Invalid Building/Floor or unit ID not found."))
         return {"success": False, "booking_results": multi_day_results, "confirmation_table": format_booking_results_table(multi_day_results, collected_info), "message": "Invalid Building/Floor or unit ID not found."}
 
     seat_num_to_check = collected_info["seat_number"]
@@ -661,8 +610,8 @@ async def process_multi_date_booking(employee_id: str, dates_list: List[datetime
                                 collected_info["seat_number"] = seat_num_to_check # Update for consistency
 
     print("seat_num_to_check:", seat_num_to_check)  
-    print("dates_list:", dates_list)
-    for date_obj in dates_list:
+    print("dates_list:", dates_to_book_dt)
+    for date_obj in dates_to_book_dt:
         floor_booking_data = await get_floor_booking_info(access_token, unit_id, date_obj)
         if not floor_booking_data:
             multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="Failed to get availability for this date."))
@@ -721,7 +670,8 @@ def clear_user_flow_state(employee_id: str, intent_to_clear: Optional[str] = Non
         "intent", "cancellation_step", "selected_allocation_id_for_cancel",
         "cancellable_bookings_cache", "awaiting_booking_confirmation",
         "booking_dates_iso", "offered_tomorrow", "offered_next_week",
-        "specific_booking_details_for_cancel" # For specific cancellation flow
+        "specific_booking_details_for_cancel", # For specific cancellation flow
+        "llm_parsed_dates_iso_list", "llm_parsed_cancel_date_iso", "selected_allocation_id"
     ]
     
     # Fields related to booking
@@ -742,18 +692,189 @@ def clear_user_flow_state(employee_id: str, intent_to_clear: Optional[str] = Non
         fields_to_pop.extend(cancel_related_fields)
         fields_to_pop.extend(view_history_related_fields)
 
-    for field in fields_to_pop:
+    for field in set(fields_to_pop): # Use set to avoid duplicates
         user_data_store[employee_id]["collected_info"].pop(field, None)
+
+async def get_llm_response_for_booking(message: str, conversation_history: List[Dict[str, str]], collected_info: Dict[str, Any]):
+    system_prompt_parts = ["You are a helpful assistant for Bosch seat booking."]
+    missing_fields_desc = [] # For human-readable list of missing fields
+    
+    # Define required fields for booking and their user-friendly descriptions
+    required_booking_fields_map = {
+        "booking_days_description": "booking_days_description (e.g., 'today and next 2 days', 'next Monday', '15th July')",
+        "building_no": "building number (e.g., '903')",
+        "floor": "floor (e.g., 'Floor 1', '2nd floor')",
+        "seat_number": "seat number (e.g., 'L1-001')"
+    }
+    
+    # Check which required fields are missing
+    for field_key, field_desc in required_booking_fields_map.items():
+        if field_key not in collected_info or not collected_info[field_key]:
+            missing_fields_desc.append(field_desc)
+    
+    if missing_fields_desc:
+        system_prompt_parts.append(f"Ask for the first missing detail for booking: {missing_fields_desc[0]}.")
+        if len(missing_fields_desc) > 1:
+            system_prompt_parts.append(f"The other pending fields for booking are: {', '.join(missing_fields_desc[1:])}.")
+    else:
+        system_prompt_parts.append("All required information for booking (days, building, floor, seat number) seems to be collected. You should be preparing a summary.")
+    
+    system_prompt_parts.extend([
+        "Do not ask for employee name or email; they will be fetched automatically from the API.",
+        "Do NOT ask for the booking time. The booking will be for the standard working hours (8 AM to 8 PM).",
+        "Focus only on collecting information for seat booking: booking days description, building number, floor, and seat number. Ask only one question at a time. Be friendly but efficient.",
+        "If the user has provided all necessary information for booking, do not ask for it again.",
+        "Do not ask for confirmation to book yet; that will be handled separately.",
+        "Do not show internal API details. Respond concisely."
+    ])
+    system_content = "\n".join(system_prompt_parts)
+    messages = [SystemMessage(content=system_content)]
+    for msg in conversation_history: messages.append(HumanMessage(content=msg["content"]) if msg["role"] == "user" else AIMessage(content=msg["content"]))
+    messages.append(HumanMessage(content=message))
+    try:
+        response = llm.invoke(messages)
+        return response.content
+    except Exception as e:
+        print(f"LLM error in get_llm_response_for_booking: {e}")
+        raise HTTPException(status_code=500, detail=f"Error calling Azure OpenAI: {str(e)}")
+
+def normalize_seat_number(seat_number: str) -> str:
+    """
+    Normalize seat number by removing hyphens and converting to lowercase
+    for flexible comparison.
+    """
+    return seat_number.replace("-", "").lower()
+
+def seats_match(seat1: str, seat2: str) -> bool:
+    """
+    Compare two seat numbers flexibly by normalizing them first.
+    This handles cases where one has hyphens and the other doesn't.
+    """
+    return normalize_seat_number(seat1) == normalize_seat_number(seat2)
+
+async def extract_info_with_llm(message: str, current_info: Dict[str, Any], today_iso_date: str) -> Dict[str, Any]:
+    """
+    Analyzes the user message to extract intent and parameters using a structured LLM prompt
+    that is less prone to content filtering.
+    """
+    today_date = datetime.strptime(today_iso_date, "%Y-%m-%d")
+
+    llm_context_info = {
+        k: v for k, v in current_info.items()
+        if k not in ['cancellable_bookings_cache', 'booking_history_cache', 'associate_api_data', 'employee_name', 'employee_email']
+    }
+    system_prompt = f"""
+You are an expert AI assistant for a seat booking system. Your task is to analyze a user's message and conversation context, then output a single, valid JSON object.
+
+The JSON object must have two keys: "intent" and "parameters".
+Today's date is: {today_iso_date}.
+
+--- INTENTS ---
+- 'book_seat': User wants to reserve a seat (even if details are incomplete).
+- 'cancel_seat': User wants to cancel a booking (even if details are incomplete).
+- 'view_booking_history': User wants to see their booking history.
+- 'general_query': The request is completely unrelated to booking, canceling, or viewing history, or is just a greeting.
+
+--- PARAMETERS (by Intent) ---
+1. For 'book_seat':
+   - 'booking_days_description': The user's raw text for dates (e.g., 'next 3 days', 'July 15th').
+   - 'llm_parsed_dates_iso_list': A list of all dates in 'YYYY-MM-DD' format. Fully resolve all ranges. Example: "June 9-11" becomes ["{today_date.year}-06-09", "{today_date.year}-06-10", "{today_date.year}-06-11"].
+   - 'building_no': Building number (e.g., '903').
+   - 'floor': Floor description (e.g., '2nd floor').
+   - 'seat_number': Seat identifier, normalized to uppercase (e.g., 'L1-001').
+
+2. For 'cancel_seat':
+   - 'cancel_seat_number': The seat to cancel, normalized to uppercase.
+   - 'cancel_date_description': The user's raw text for the cancellation date.
+   - 'llm_parsed_cancel_date_iso': The single cancellation date in 'YYYY-MM-DD' format.
+
+3. For 'view_booking_history':
+   - 'history_count': The number of bookings to show (e.g., '3').
+
+--- RULES ---
+- IMPORTANT: Recognize the intent even if booking/cancellation details are incomplete. For example:
+  * "book a seat" → intent: "book_seat" (even without building/floor/seat details)
+  * "cancel my booking" → intent: "cancel_seat" (even without seat number/date)
+  * "show my history" → intent: "view_booking_history"
+- Only extract parameters from the user's LATEST message.
+- If a parameter is not mentioned in the latest message, do not include its key in the 'parameters' object.
+- Use 'general_query' only for messages completely unrelated to seat booking operations (like greetings, weather questions, etc.).
+
+--- EXAMPLES ---
+User message: "book a seat"
+Your output:
+{{
+  "intent": "book_seat",
+  "parameters": {{}}
+}}
+
+User message: "cancel L1-004 on 10 Jun 2025"
+Your output:
+{{
+  "intent": "cancel_seat",
+  "parameters": {{
+    "cancel_seat_number": "L1-004",
+    "cancel_date_description": "10 Jun 2025",
+    "llm_parsed_cancel_date_iso": "2025-06-10"
+  }}
+}}
+
+User message: "cancel my booking"
+Your output:
+{{
+  "intent": "cancel_seat",
+  "parameters": {{}}
+}}
+"""
+    human_prompt_content = f"""
+Analyze the following information and provide the JSON output as specified in your instructions.
+
+- Current conversational state: {json.dumps(llm_context_info)}
+- User's latest message: "{message}"
+"""
+    try:
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt_content)
+        ]
+        response_llm = llm.invoke(messages)
+        extracted_json_str = response_llm.content.strip()
+        
+        # Try to find JSON block if LLM adds extra text
+        match_json = re.search(r"\{.*\}", extracted_json_str, re.DOTALL)
+        if match_json:
+            extracted_json_str = match_json.group(0)
+
+        llm_output = json.loads(extracted_json_str)
+        print(f"LLM Raw Output: {llm_output}")
+
+        # Construct the final dictionary to return
+        final_output = {}
+        final_output["intent"] = llm_output.get("intent", "general_query")
+        
+        # Merge parameters into the top-level of the dictionary
+        if "parameters" in llm_output and isinstance(llm_output["parameters"], dict):
+            final_output.update(llm_output["parameters"])
+
+        print(f"LLM Extracted and Processed Info: {final_output}")
+        return final_output
+
+    except json.JSONDecodeError as e:
+        print(f"JSONDecodeError in extract_info_with_llm: {e}. Raw LLM response: {extracted_json_str}")
+        return {"intent": "general_query"}
+    except Exception as e:
+        print(f"General Error in extract_info_with_llm: {e}")
+        return {"intent": "general_query"}
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest = Body(...)):
     message_text = request.message.strip()
     employee_id = request.employee_id
+    today_iso_date_str = datetime.now().strftime("%Y-%m-%d")
     
     if employee_id not in user_data_store:
         user_data_store[employee_id] = {"conversation_history": [], "collected_info": {}, "associate_api_data": None}
-        # Try to fetch associate info on first contact for name/email
         access_token = await get_new_access_token()
         if access_token:
             api_data = await get_associate_info(access_token, employee_id)
@@ -766,365 +887,253 @@ async def chat(request: ChatRequest = Body(...)):
     final_bot_response = ""
     is_flow_complete_for_response = False
 
-    # --- Initial Reset Handling ---
+    # --- 1. Initial Reset/Greeting Handling ---
     if message_text.lower() in RESET_COMMANDS:
-        user_data_store[employee_id]["collected_info"] = {} # Clear only collected_info, keep history for context if needed, or clear history too
-        # user_data_store[employee_id]["conversation_history"] = [] # Optionally reset history
-        history, collected_info = user_data_store[employee_id]["conversation_history"], user_data_store[employee_id]["collected_info"]
+        clear_user_flow_state(employee_id, None) 
+        history.clear() 
+        collected_info = user_data_store[employee_id]["collected_info"] 
         final_bot_response = generate_initial_greeting(employee_id)
-        is_flow_complete_for_response = True # Resets the flow
-        # Append to history after reset
+        is_flow_complete_for_response = True 
         history.append({"role": "user", "content": message_text})
         history.append({"role": "assistant", "content": final_bot_response})
         return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=is_flow_complete_for_response)
 
-    # --- Initial Greeting Handling ---
-    if message_text.lower() in GREETING_COMMANDS and not collected_info.get("intent"):
+    if message_text.lower() in GREETING_COMMANDS and \
+       not collected_info.get("intent") and \
+       not collected_info.get("awaiting_booking_confirmation") and \
+       not collected_info.get("cancellation_step"):
         final_bot_response = generate_initial_greeting(employee_id)
-        # No flow completion here, just a greeting response
         history.append({"role": "user", "content": message_text})
         history.append({"role": "assistant", "content": final_bot_response})
         return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=False)
 
+    # --- 2. Log User Message and Extract Intent & Parameters via LLM ---
+    history.append({"role": "user", "content": message_text})
+    
+    previous_intent_before_llm = collected_info.get("intent")
+    llm_context = {k: v for k, v in collected_info.items() if k not in ['cancellable_bookings_cache', 'booking_history_cache', 'associate_api_data', 'employee_name', 'employee_email']}
+    
+    extracted_llm_data = await extract_info_with_llm(message_text, llm_context, today_iso_date_str)
+    
+    newly_extracted_intent = extracted_llm_data.get("intent")
+
+    # --- 3. Handle Intent Change (Interrupt Flow if Necessary) ---
+    if newly_extracted_intent and newly_extracted_intent != previous_intent_before_llm:
+        print(f"Intent changed from '{previous_intent_before_llm}' to '{newly_extracted_intent}'. Clearing state for '{previous_intent_before_llm}'.")
+        clear_user_flow_state(employee_id, previous_intent_before_llm) # Clear data of OLD intent
+    
+    # Update collected_info with all data extracted by LLM
+    collected_info.update(extracted_llm_data)
+
+    current_intent = collected_info.get("intent") 
+
     user_confirms = any(w in message_text.lower() for w in ["yes", "yep", "yeah", "confirm", "proceed", "ok", "sure", "do it"])
     user_declines = any(w in message_text.lower() for w in ["no", "nope", "cancel", "stop", "don't", "do not", "never mind"])
 
-    # --- Pre-LLM State Handling for Confirmations/Selections ---
-    
-    # 1.A. Specific Cancellation Confirmation (for seat/date provided by user)
-    if collected_info.get("cancellation_step") == "awaiting_specific_confirmation":
-        print("Awaiting specific confirmation for cancellation")
-        history.append({"role": "user", "content": message_text})
-        allocation_id_to_cancel = collected_info.get("selected_allocation_id_for_cancel")
-        booking_details = collected_info.get("specific_booking_details_for_cancel", {})
-        
-        if user_confirms and allocation_id_to_cancel:
-            access_token = await get_new_access_token()
-            if access_token:
-                cancel_api_result = await cancel_booking_api(access_token, allocation_id_to_cancel)
-                final_bot_response = cancel_api_result.message
-            else:
-                final_bot_response = "Sorry, I couldn't get authorization to cancel the booking. Please try again later."
-        elif user_declines:
-            final_bot_response = f"Okay, the booking for seat {booking_details.get('seat','N/A')} on {booking_details.get('date_str','N/A')} will not be cancelled. Is there anything else?"
-        else: # Ambiguous
-            final_bot_response = (f"I didn't quite understand. Please confirm with 'yes' or 'no' if you want to cancel the booking "
-                                  f"for seat {booking_details.get('seat','N/A')} on {booking_details.get('date_str','N/A')}.")
-            history.append({"role": "assistant", "content": final_bot_response})
-            return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=False)
-
-        clear_user_flow_state(employee_id, "cancel_seat")
-        is_flow_complete_for_response = True
-        history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=is_flow_complete_for_response)
-
-    # 1.B. List-based Cancellation Confirmation (user selected from a list)
-    elif collected_info.get("cancellation_step") == "awaiting_confirmation": # This is for list-based selection
-        print("Awaiting confirmation for cancellation from list selection")
-        history.append({"role": "user", "content": message_text})
-        allocation_id_to_cancel = collected_info.get("selected_allocation_id_for_cancel")
-        print("allocation_id_to_cancel from step 1.B:", allocation_id_to_cancel)
-        if user_confirms and allocation_id_to_cancel:
-            access_token = await get_new_access_token()
-            if access_token:
-                cancel_api_result = await cancel_booking_api(access_token, allocation_id_to_cancel)
-                final_bot_response = cancel_api_result.message
-            else:
-                final_bot_response = "Sorry, I couldn't get authorization to cancel the booking. Please try again later."
-        elif user_declines:
-            final_bot_response = "Okay, the booking will not be cancelled. Is there anything else?"
-        else:
-            final_bot_response = "I didn't quite understand. Please confirm with 'yes' or 'no' if you want to cancel this booking."
-            history.append({"role": "assistant", "content": final_bot_response})
-            return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=False)
-
-        clear_user_flow_state(employee_id, "cancel_seat")
-        is_flow_complete_for_response = True
-        history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=is_flow_complete_for_response)
-
-    # 2. List-based Cancellation Selection (user chooses from a numbered list)
-    elif collected_info.get("cancellation_step") == "awaiting_selection":
-        print("Awaiting selection for cancellation from list")
-        history.append({"role": "user", "content": message_text})
-        cancellable_bookings_cache = collected_info.get("cancellable_bookings_cache", [])
-        print("cancellable_bookings_cache:", cancellable_bookings_cache)
-        selected_index = -1
-        if user_declines or message_text.lower() in ["none", "skip"]:
-             final_bot_response = "Okay, no bookings will be cancelled. How else can I help?"
-             clear_user_flow_state(employee_id, "cancel_seat")
-             is_flow_complete_for_response = True
-        else:
-            try:
-                match = re.search(r'\d+', message_text)
-                if match: selected_index = int(match.group(0)) - 1 # User sees 1-based
-                
-                if 0 <= selected_index < len(cancellable_bookings_cache):
-                    selected_booking = cancellable_bookings_cache[selected_index]
-                    collected_info["selected_allocation_id_for_cancel"] = selected_booking.allocationID
-                    collected_info["cancellation_step"] = "awaiting_confirmation" # Standard confirmation for list
-                    dt_obj = datetime.fromisoformat(selected_booking.fromDate)
-                    final_bot_response = (f"You selected to cancel booking for {selected_booking.seat} "
-                                          f"on {dt_obj.strftime('%d %b %Y')} "
-                                          f"in {selected_booking.building}. Are you sure? (yes/no)")
-                    is_flow_complete_for_response = False # Awaiting confirmation
-                else:
-                    final_bot_response = "That's not a valid selection. Please enter the number of the booking you want to cancel, or say 'none'."
-                    is_flow_complete_for_response = False # Still awaiting valid selection
-            except ValueError:
-                final_bot_response = "Please enter a number for the booking to cancel, or 'none'."
-                is_flow_complete_for_response = False
-
-        history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=is_flow_complete_for_response)
-
-    # 3. Booking Confirmation
-    elif collected_info.get("awaiting_booking_confirmation"):
-        history.append({"role": "user", "content": message_text})
+    # --- 4. Process Confirmation Steps (if intent hasn't changed away from them) ---
+    if collected_info.get("cancellation_step") == "awaiting_confirmation" and current_intent == "cancel_seat":
         if user_confirms:
-            dates_to_book_iso = collected_info.get("booking_dates_iso", [])
-            final_dates_to_book_dt = [datetime.fromisoformat(date_str) for date_str in dates_to_book_iso]
-            current_processing_time = datetime.now()
-            if collected_info.get("offered_tomorrow"): # User confirmed to add tomorrow
-                tomorrow_dt = (current_processing_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                if tomorrow_dt.weekday() < 5 and not any(d.date() == tomorrow_dt.date() for d in final_dates_to_book_dt):
-                    final_dates_to_book_dt.append(tomorrow_dt)
-            if collected_info.get("offered_next_week"): # User confirmed to add next week
-                start_of_next_week_monday_dt = (current_processing_time - timedelta(days=current_processing_time.weekday()) + timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
-                for i in range(5):
-                    next_week_day_dt = start_of_next_week_monday_dt + timedelta(days=i)
-                    if not any(d.date() == next_week_day_dt.date() for d in final_dates_to_book_dt):
-                        final_dates_to_book_dt.append(next_week_day_dt)
-            final_dates_to_book_dt = sorted(list(set(final_dates_to_book_dt)))
-
-            if final_dates_to_book_dt:
-                booking_process_result = await process_multi_date_booking(employee_id, final_dates_to_book_dt, collected_info)
-                final_bot_response = f"Your booking request has been processed.\n\n{booking_process_result['confirmation_table']}"
+            allocation_id = collected_info.get("selected_allocation_id")
+            access_token = await get_new_access_token() 
+            if not access_token:
+                final_bot_response = "Sorry, I couldn't get authorization. Please try again later."
+            elif allocation_id:
+                cancel_result = await cancel_booking_api(access_token, allocation_id)
+                if cancel_result.message.startswith("Seat is cancled"):
+                    final_bot_response += "Your booking has been successfully cancelled."
+                print(f"Cancel result message: {cancel_result.message}")
             else:
-                final_bot_response = "Okay, but it seems there were no valid dates to book. Please try again with different dates."
+                final_bot_response = "Error: No booking was selected for cancellation."
             is_flow_complete_for_response = True
+            clear_user_flow_state(employee_id, "cancel_seat")
         elif user_declines:
-            final_bot_response = "Okay, I will not proceed with the booking. Is there anything else I can help you with?"
+            final_bot_response = "Okay, the booking will not be cancelled. Anything else?"
             is_flow_complete_for_response = True
-        else: # Ambiguous
-            final_bot_response = "I'm sorry, I didn't catch that. Do you want to proceed with the booking summary shown? (yes/no)"
-            history.append({"role": "assistant", "content": final_bot_response})
-            return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=False)
-
-        clear_user_flow_state(employee_id, "book_seat")
+            clear_user_flow_state(employee_id, "cancel_seat")
+        else: 
+            final_bot_response = "I didn't quite understand. Please confirm with 'yes' or 'no' to cancel this booking."
+        
         history.append({"role": "assistant", "content": final_bot_response})
         return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=is_flow_complete_for_response)
 
+    elif collected_info.get("awaiting_booking_confirmation") and current_intent == "book_seat":
+        if user_confirms:
+            dates_to_book_iso = collected_info.get("llm_parsed_dates_iso_list", [])
 
-    # --- LLM Intent Extraction and Main Flow Dispatch ---
-    history.append({"role": "user", "content": message_text})
-    info_for_llm = {k: v for k, v in collected_info.items() if k not in ['cancellable_bookings_cache', 'booking_history_cache', 'associate_api_data']}
-    extracted_llm_info = await extract_info_with_llm(message_text, info_for_llm)
-    
-    # If intent changed, clear old intent-specific fields before updating
-    if "intent" in extracted_llm_info and extracted_llm_info["intent"] != collected_info.get("intent"):
-        clear_user_flow_state(employee_id, collected_info.get("intent")) 
-    collected_info.update(extracted_llm_info)
-    user_intent = collected_info.get("intent")
+            # --- START: Past Date Validation Fix ---
+            today = datetime.now().date()
+            valid_dates_iso = []
+            ignored_dates_count = 0
 
-    # A. Cancellation Intent
-    if user_intent == "cancel_seat":
-        print("Processing cancellation intent with collected info:", collected_info)
-        seat_to_cancel_str = collected_info.get("cancel_seat_number")
-        date_desc_to_cancel = collected_info.get("cancel_date_description")
-        access_token = await get_new_access_token()
-        print("seat_to_cancel_str:", seat_to_cancel_str)
-        print("date_desc_to_cancel:", date_desc_to_cancel)  
-        if not access_token:
-            final_bot_response = "Sorry, I couldn't get authorization to manage bookings. Please try again later."
-            is_flow_complete_for_response = True
-        elif seat_to_cancel_str and date_desc_to_cancel: # Specific cancellation request
-            parsed_cancel_dates = parse_booking_days(date_desc_to_cancel)
-            if not parsed_cancel_dates or len(parsed_cancel_dates) != 1: # Enforce single date for cancellation
-                final_bot_response = "The date you provided for cancellation is unclear or specifies multiple dates. Please provide a single specific date (e.g., 'July 20th', 'tomorrow')."
-                collected_info.pop("cancel_date_description", None) # Clear to ask again
-                is_flow_complete_for_response = False
-            else:
-                cancel_date_obj = parsed_cancel_dates[0]
-                all_bookings = await get_booking_history(access_token, employee_id)
-                found_booking_to_cancel = None
-                for booking in all_bookings:
-                    try:
-                        booking_date_dt = datetime.fromisoformat(booking.fromDate)
-                        if booking.seat.lower() == seat_to_cancel_str.lower() and \
-                           booking_date_dt.date() == cancel_date_obj.date():
-                            found_booking_to_cancel = booking
-                            break
-                    except ValueError: continue # Error parsing date from history
-
-                if found_booking_to_cancel:
-                    if found_booking_to_cancel.status == 4: # Booked, can be cancelled
-                        if datetime.fromisoformat(found_booking_to_cancel.fromDate).date() >= datetime.now().date():
-                            collected_info["selected_allocation_id_for_cancel"] = found_booking_to_cancel.allocationID
-                            collected_info["cancellation_step"] = "awaiting_specific_confirmation"
-                            collected_info["specific_booking_details_for_cancel"] = {
-                                "seat": found_booking_to_cancel.seat,
-                                "date_str": cancel_date_obj.strftime('%B %d, %Y')
-                            }
-                            final_bot_response = (f"Found booking for seat {found_booking_to_cancel.seat} on "
-                                                  f"{cancel_date_obj.strftime('%B %d, %Y')}. Are you sure you want to cancel it? (yes/no)")
-                            is_flow_complete_for_response = False
-                        else:
-                            final_bot_response = f"The booking for seat {seat_to_cancel_str} on {cancel_date_obj.strftime('%B %d, %Y')} is in the past and cannot be cancelled."
-                            clear_user_flow_state(employee_id, "cancel_seat")
-                            is_flow_complete_for_response = True
-                    elif found_booking_to_cancel.status == 1: # Already Cancelled
-                        final_bot_response = f"The booking for seat {seat_to_cancel_str} on {cancel_date_obj.strftime('%B %d, %Y')} is already cancelled."
-                        clear_user_flow_state(employee_id, "cancel_seat")
-                        is_flow_complete_for_response = True
-                    else: # Other statuses like Checked-In (2), Auto-Cancelled (3)
-                        status_name = get_status_name(found_booking_to_cancel.status)
-                        final_bot_response = f"The booking for seat {seat_to_cancel_str} on {cancel_date_obj.strftime('%B %d, %Y')} has a status of '{status_name}' and cannot be cancelled by you at this time."
-                        clear_user_flow_state(employee_id, "cancel_seat")
-                        is_flow_complete_for_response = True
-                else:
-                    final_bot_response = f"I couldn't find an active booking for seat {seat_to_cancel_str} on {cancel_date_obj.strftime('%B %d, %Y')}. Would you like to see a list of your cancellable bookings, or try a different seat/date?"
-                    collected_info.pop("cancel_seat_number", None)
-                    collected_info.pop("cancel_date_description", None)
-                    is_flow_complete_for_response = False 
-        
-        elif seat_to_cancel_str and not date_desc_to_cancel:
-            final_bot_response = f"For which date would you like to cancel the booking for seat {seat_to_cancel_str}? Please provide a single specific date."
-            is_flow_complete_for_response = False
-        elif not seat_to_cancel_str and date_desc_to_cancel:
-            final_bot_response = f"Which seat booking would you like to cancel for {date_desc_to_cancel}?"
-            is_flow_complete_for_response = False
-        else: # General "cancel" request, or if specific details were not fully provided
-            booking_hist_items = await get_booking_history(access_token, employee_id)
-            cancellable_bookings = filter_and_sort_cancellable_bookings(booking_hist_items) 
+            for date_str in dates_to_book_iso:
+                try:
+                    # Compare only the date part, ignoring any time information
+                    if datetime.fromisoformat(date_str.split('T')[0]).date() >= today:
+                        valid_dates_iso.append(date_str)
+                    else:
+                        ignored_dates_count += 1
+                except (ValueError, TypeError):
+                    # Also count malformed date strings from the LLM as ignored
+                    ignored_dates_count += 1
             
-            if not cancellable_bookings:
-                final_bot_response = "You have no active bookings that can be cancelled at this time."
-                clear_user_flow_state(employee_id, "cancel_seat")
-                is_flow_complete_for_response = True
-            else:
-                response_parts = ["Here are your bookings that can be cancelled (Status 4 = Booked):\n"]
-                for i, booking in enumerate(cancellable_bookings):
-                    dt_obj = datetime.fromisoformat(booking.fromDate)
-                    response_parts.append(f"{i+1}. {booking.seat} on {dt_obj.strftime('%d %b %Y')} in {booking.building} ({booking.location})")
-                response_parts.append("\nPlease enter the number of the booking you wish to cancel, or say 'none'.")
-                final_bot_response = "\n".join(response_parts)
-                collected_info["cancellable_bookings_cache"] = cancellable_bookings
-                collected_info["cancellation_step"] = "awaiting_selection" 
-                is_flow_complete_for_response = False
+            warning_message = ""
+            if ignored_dates_count > 0:
+                plural_s = "s" if ignored_dates_count > 1 else ""
+                warning_message = f"Please note: I cannot book seats for past dates. {ignored_dates_count} requested date{plural_s} were ignored.\n\n"
 
-    # B. View Booking History Intent
-    elif user_intent == "view_booking_history":
+            if valid_dates_iso:
+                # Proceed to book only the valid, future-or-today dates
+                booking_process_result = await process_multi_date_booking(employee_id, valid_dates_iso, collected_info)
+                if booking_process_result["success"]: 
+                    final_bot_response = warning_message + f"Your booking request for the valid dates has been processed.\n\n{booking_process_result['confirmation_table']}"
+                    history.clear() 
+                    history.append({"role": "user", "content": message_text})
+                else:
+                    final_bot_response = warning_message + f"Your booking request for the valid dates was processed, but encountered issues:\n\n{booking_process_result['confirmation_table']}"
+            else:
+                # This branch is reached if the initial date list was empty OR contained only past/invalid dates.
+                final_bot_response = warning_message + "There were no valid future dates to book. Please try the booking process again with a valid date (today or later)."
+            
+            is_flow_complete_for_response = True
+            clear_user_flow_state(employee_id, "book_seat")
+            # --- END: Past Date Validation Fix ---
+
+        elif user_declines:
+            final_bot_response = "Okay, I will not proceed with the booking. Is there anything else?"
+            is_flow_complete_for_response = True
+            clear_user_flow_state(employee_id, "book_seat")
+        else: 
+            final_bot_response = "I'm sorry, I didn't catch that. Do you want to proceed with the booking? (yes/no)"
+
+        history.append({"role": "assistant", "content": final_bot_response})
+        return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=is_flow_complete_for_response)
+
+    # --- 5. Main Intent Processing Logic (driven by LLM output) ---
+    if current_intent == "cancel_seat":
         access_token = await get_new_access_token()
         if not access_token:
-            final_bot_response = "Sorry, I couldn't get authorization to check your booking history. Please try again later."
+            final_bot_response = "Sorry, system error getting authorization. Please try again."
+            is_flow_complete_for_response = True
+        else:
+            seat_number = collected_info.get("cancel_seat_number")
+            parsed_cancel_date_iso = collected_info.get("llm_parsed_cancel_date_iso") # From LLM
+            
+            if not seat_number and not parsed_cancel_date_iso:
+                 final_bot_response = "To cancel a booking, please tell me the seat number and the date (e.g., 'cancel L1-001 for tomorrow')."
+            elif not seat_number:
+                final_bot_response = "Okay, which seat number do you want to cancel?"
+            elif not parsed_cancel_date_iso:
+                final_bot_response = f"And for which date do you want to cancel seat {seat_number}? Please provide a single specific date (e.g., 'July 15th' or 'tomorrow')."
+                if collected_info.get("cancel_date_description") and not parsed_cancel_date_iso: 
+                    final_bot_response = f"I had trouble understanding the date '{collected_info.get('cancel_date_description')}' for cancelling seat {seat_number}. Could you please provide a single specific date?"
+                collected_info.pop("llm_parsed_cancel_date_iso", None)
+                collected_info.pop("cancel_date_description", None)
+            else: # Both seat and parsed_cancel_date_iso provided
+                try:
+                    target_date_obj = datetime.strptime(parsed_cancel_date_iso, "%Y-%m-%d").date()
+                except ValueError:
+                    final_bot_response = "The date provided for cancellation seems invalid. Please try again with a YYYY-MM-DD format or a clear description like 'tomorrow'."
+                    collected_info.pop("llm_parsed_cancel_date_iso", None)
+                    collected_info.pop("cancel_date_description", None)
+                else:
+                    all_bookings = await get_booking_history(access_token, employee_id)
+                    found_booking = None
+                    for booking in all_bookings:
+                        try:
+                            booking_date = datetime.fromisoformat(booking.fromDate).date()
+                            if (seats_match(booking.seat, seat_number) and 
+                                  booking_date == target_date_obj and 
+                                   booking.status == 4 and booking_date >= datetime.now().date()):
+                                found_booking = booking
+                                break
+                        except ValueError: continue 
+                    
+                    if found_booking:
+                        final_bot_response = (f"I found a booking for seat {found_booking.seat} on "
+                                            f"{target_date_obj.strftime('%B %d, %Y')} (Building: {found_booking.building}, Floor: {found_booking.floor}). "
+                                            f"Are you sure you want to cancel it? (yes/no)")
+                        collected_info["selected_allocation_id"] = found_booking.allocationID
+                        collected_info["cancellation_step"] = "awaiting_confirmation"
+                    else:
+                        final_bot_response = (f"I couldn't find an active, cancellable booking for seat {seat_number} on "
+                                            f"{target_date_obj.strftime('%B %d, %Y')}. "
+                                            f"Please double-check the details or note that only 'Booked' status items for today or future can be cancelled.")
+                        clear_user_flow_state(employee_id, "cancel_seat")
+
+
+    elif current_intent == "view_booking_history":
+        access_token = await get_new_access_token()
+        if not access_token:
+            final_bot_response = "Sorry, system error getting authorization for history. Please try again."
         else:
             booking_hist_items = await get_booking_history(access_token, employee_id)
+            print(f"Booking history items fetched: {len(booking_hist_items)}")
             if not booking_hist_items:
                 final_bot_response = "You have no booking history."
             else:
-                booking_hist_items.sort(key=lambda item: datetime.fromisoformat(item.fromDate), reverse=True)
-                
+                # Sort by 'time' field (when booking was made/cancelled) instead of 'fromDate'
+                booking_hist_items.sort(key=lambda item: datetime.fromisoformat(item.time), reverse=True)
+                count_str = collected_info.get("history_count", "5") 
                 try:
-                    count_str = collected_info.get("history_count", "5") 
-                    history_count_to_show = int(re.search(r'\d+', count_str).group(0) if re.search(r'\d+', count_str) else 5)
-                except (ValueError, AttributeError):
-                    history_count_to_show = 5
+                    history_count_to_show = int(re.search(r'\d+', str(count_str)).group(0) if re.search(r'\d+', str(count_str)) else 5)
+                    print(f"History count to show: {history_count_to_show}")
+                except (ValueError, AttributeError): history_count_to_show = 5
                 
-                history_to_show = booking_hist_items[:history_count_to_show]
-                
-                response_parts = [f"Here are your latest {len(history_to_show)} booking(s):\n"]
+                history_to_show = booking_hist_items[:min(history_count_to_show, len(booking_hist_items))]
+                print(f"Filtered history to show: {len(history_to_show)} items")
+                response_parts = [f"Here are your {len(history_to_show)} most recent booking(s):\n"]
                 for item in history_to_show:
                     dt_obj = datetime.fromisoformat(item.fromDate)
+                    booking_time = datetime.fromisoformat(item.time)
                     status_name = get_status_name(item.status)
                     response_parts.append(
-                        f"- Seat: {item.seat}, Date: {dt_obj.strftime('%d %b %Y, %I:%M %p')}, "
+                        f"- Seat: {item.seat}, Booked for: {dt_obj.strftime('%d %b %Y, %I:%M %p')}, "
+                        f"Booked on: {booking_time.strftime('%d %b %Y, %I:%M %p')}, "
                         f"Building: {item.building}, Floor: {item.floor}, Status: {status_name}"
                     )
+                    print("response_parts ",response_parts)  # Debug print for each item
                 final_bot_response = "\n".join(response_parts)
-        clear_user_flow_state(employee_id, "view_booking_history")
         is_flow_complete_for_response = True
+        clear_user_flow_state(employee_id, "view_booking_history")
 
-    # C. Booking Intent
-    elif user_intent == "book_seat":
-        # Required fields for booking are: booking_days_description, building_no, floor, seat_number
-        all_required_booking_fields_collected = (
-            collected_info.get("booking_days_description") and
-            collected_info.get("building_no") and
-            collected_info.get("floor") and
-            collected_info.get("seat_number")
-        )
+    elif current_intent == "book_seat":
+        required_booking_params = ["llm_parsed_dates_iso_list", "building_no", "floor", "seat_number"]
+        all_info_collected = all(field in collected_info and collected_info[field] for field in required_booking_params)
 
-        if all_required_booking_fields_collected:
-            llm_ack_response = await get_llm_response_for_booking(message_text, history, collected_info)
-            history.append({"role": "assistant", "content": llm_ack_response}) 
+        if all_info_collected:
+            parsed_dates_iso = collected_info["llm_parsed_dates_iso_list"]
+            booking_summary = f"""
+Okay, I have the following details for your booking:
+- Seat: {collected_info['seat_number'].upper()}
+- Building: {collected_info['building_no']}
+- Floor: {collected_info['floor']}
+- Dates: {format_dates_for_display(parsed_dates_iso)}
 
-            current_time_for_rules = datetime.now()
-            parsed_dates = parse_booking_days(collected_info["booking_days_description"])
-            valid_dates_for_preview, user_notifications = [], []
-            offer_tomorrow_instead, offer_next_week_instead = False, False
-
-            for date_obj in parsed_dates:
-                is_today, day_name = (date_obj.date() == current_time_for_rules.date()), date_obj.strftime('%A, %d %b')
-                if date_obj.weekday() >= 5: user_notifications.append(f"Bookings are not available on weekends. {day_name} skipped.")
-                elif is_today and date_obj.weekday() <= 3 and current_time_for_rules.hour >= 17:
-                    user_notifications.append(f"Booking for today ({day_name}) is closed (it's past 5 PM).")
-                    offer_tomorrow_instead = True
-                elif is_today and date_obj.weekday() == 4 and current_time_for_rules.hour >= 17:
-                    user_notifications.append(f"Booking for today ({day_name}) is closed (it's past 5 PM on Friday).")
-                    offer_next_week_instead = True
-                elif date_obj < current_time_for_rules.replace(hour=0, minute=0, second=0, microsecond=0):
-                    user_notifications.append(f"Cannot book for a past date: {day_name}. Skipped.")
-                else: valid_dates_for_preview.append(date_obj)
-            
-            valid_dates_for_preview = sorted(list(set(valid_dates_for_preview)))
-            collected_info["booking_dates_iso"] = [d.isoformat() for d in valid_dates_for_preview]
+Do you want to proceed with this booking? (yes/no)
+"""
+            final_bot_response = booking_summary
             collected_info["awaiting_booking_confirmation"] = True
-            collected_info["offered_tomorrow"] = offer_tomorrow_instead
-            collected_info["offered_next_week"] = offer_next_week_instead
-
-            response_parts = [""]
-            if user_notifications: response_parts.append("\n" + "\n".join(user_notifications))
-            if valid_dates_for_preview:
-                preview_table = "| Date | Building | Floor | Seat Number |\n|------|----------|-------|-------------|\n"
-                for date_obj in valid_dates_for_preview:
-                    preview_table += f"| {date_obj.strftime('%d.%b.%Y')} | {collected_info['building_no']} | {collected_info['floor']} | {collected_info['seat_number']} |\n"
-                response_parts.append(f"\nHere's a summary for the valid dates based on your request:\n\n{preview_table}")
-            
-            alt_prompts = []
-            if offer_tomorrow_instead and not any(d.date() == (current_time_for_rules + timedelta(days=1)).date() for d in valid_dates_for_preview):
-                 alt_prompts.append("Would you like to book for tomorrow as well?")
-            if offer_next_week_instead: alt_prompts.append("Would you like to book for next week (Mon-Fri) instead/as well?")
-            if alt_prompts: response_parts.append("\n" + " ".join(alt_prompts))
-
-            if valid_dates_for_preview or alt_prompts: 
-                response_parts.append("\n\n**Do you want to proceed with this booking?** (yes/no)")
-            else: 
-                response_parts.append("\nIt seems there are no valid dates to book based on your request and current booking rules. Please try different dates or criteria.")
-                clear_user_flow_state(employee_id, "book_seat") 
-                is_flow_complete_for_response = True
-            final_bot_response = "\n".join(filter(None,response_parts)) # Filter out empty strings before joining
-            is_flow_complete_for_response = is_flow_complete_for_response or False # Keep false if not set true by no valid dates
-        else:
+        else: 
             final_bot_response = await get_llm_response_for_booking(message_text, history, collected_info)
-            is_flow_complete_for_response = False
+
+    elif current_intent == "general_query" or not current_intent :
+        final_bot_response = "I can help you book seats, cancel bookings, or view your booking history. What would you like to do today?"
+        is_flow_complete_for_response = True 
+        clear_user_flow_state(employee_id, "general_query") 
     
-    # D. General Query or Unclear Intent
-    else:
-        final_bot_response = "I can help you book a seat (I'll need the days, building, floor, and seat number), cancel an existing booking (I'll need the seat number and specific date), or view your booking history. Please specify what you'd like to do."
-        if history and history[-1]["role"] == "assistant" and "book a seat" in history[-1]["content"].lower(): # Avoid repeating generic help
-             final_bot_response = "Sorry, I'm not sure how to help with that. You can ask me to 'book a seat', 'cancel a booking', or 'view booking history'."
-        clear_user_flow_state(employee_id, None) # Clear any stale intent
-        is_flow_complete_for_response = False # Open-ended
+    else: 
+        final_bot_response = "I'm not sure how to help with that. You can ask me to 'book a seat', 'cancel a booking', or 'view my history'."
+        is_flow_complete_for_response = True 
+
+    # --- 6. Log Bot Response and Return ---
+    MAX_HISTORY_LEN = 20 
+    if len(history) > MAX_HISTORY_LEN:
+        history = history[-MAX_HISTORY_LEN:]
+        user_data_store[employee_id]["conversation_history"] = history
 
     history.append({"role": "assistant", "content": final_bot_response})
-    
-    return ChatResponse(
-        employee_id=employee_id,
-        response=final_bot_response,
-        is_complete=is_flow_complete_for_response
-    )
+    return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=is_flow_complete_for_response)
 
 @app.get("/")
 async def root():
-    return {"message": "Bosch seat booking Chatbot API is running version:3.10"}
+    return {"message": f"Bosch seat booking Chatbot API is running version: 3.14"}

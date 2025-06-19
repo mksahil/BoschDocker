@@ -16,3 +16,4 @@ langchain-core==0.3.19
 langchain-experimental==0.3.3
 langchain-openai==0.2.9
 langchain-text-splitters==0.3.2
+python-dateutil
