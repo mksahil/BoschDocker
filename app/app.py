@@ -10,7 +10,7 @@ from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel
 
 # FastAPI App Initialization
-app = FastAPI(title="Agile Arena Bosch Chatbot API", version="3.14") # Version updated for prompt fix
+app = FastAPI(title="Agile Arena Bosch Chatbot API", version="UAT-Bugfix-1.0.0") # Version updated for prompt fix
 
 app.add_middleware(
     CORSMiddleware,
@@ -758,6 +758,7 @@ async def extract_info_with_llm(message: str, current_info: Dict[str, Any], toda
     that is less prone to content filtering.
     """
     today_date = datetime.strptime(today_iso_date, "%Y-%m-%d")
+    current_weekday = today_date.strftime('%A')
 
     llm_context_info = {
         k: v for k, v in current_info.items()
@@ -767,7 +768,7 @@ async def extract_info_with_llm(message: str, current_info: Dict[str, Any], toda
 You are an expert AI assistant for a seat booking system. Your task is to analyze a user's message and conversation context, then output a single, valid JSON object.
 
 The JSON object must have two keys: "intent" and "parameters".
-Today's date is: {today_iso_date}.
+Today's date is: {today_iso_date} ({current_weekday}).
 
 --- INTENTS ---
 - 'book_seat': User wants to reserve a seat (even if details are incomplete).
@@ -777,11 +778,18 @@ Today's date is: {today_iso_date}.
 
 --- PARAMETERS (by Intent) ---
 1. For 'book_seat':
-   - 'booking_days_description': The user's raw text for dates (e.g., 'next 3 days', 'July 15th').
-   - 'llm_parsed_dates_iso_list': A list of all dates in 'YYYY-MM-DD' format. Fully resolve all ranges. Example: "June 9-11" becomes ["{today_date.year}-06-09", "{today_date.year}-06-10", "{today_date.year}-06-11"].
-   - 'building_no': Building number (e.g., '903').
-   - 'floor': Floor description (e.g., '2nd floor').
-   - 'seat_number': Seat identifier, normalized to uppercase (e.g., 'L1-001').
+   - 'booking_days_description': The user's raw text for dates (e.g., 'next 3 days', 'July 15th', 'next monday').
+   - 'llm_parsed_dates_iso_list': A list of all dates in 'YYYY-MM-DD' format. Be very careful with date parsing:
+     * "next monday" = the upcoming Monday (if today is Monday, then next Monday is 7 days away)
+     * "tomorrow" = {(today_date + timedelta(days=1)).strftime('%Y-%m-%d')}
+     * "today" = {today_iso_date}
+     * "next week" = all weekdays (Mon-Fri) of next week starting from {(today_date + timedelta(days=7-today_date.weekday())).strftime('%Y-%m-%d')}
+     * "this week" = remaining weekdays of current week
+     * Date ranges: "June 9-11" becomes ["{today_date.year}-06-09", "{today_date.year}-06-10", "{today_date.year}-06-11"]
+     * Always assume current year unless specified otherwise
+   - 'building_no': Building number (e.g., '903', from 'Kor903' extract '903').
+   - 'floor': Floor description (e.g., '2nd floor', '1st floor').
+   - 'seat_number': Seat identifier, normalized to uppercase (e.g., 'L1A108', 'L1-001').
 
 2. For 'cancel_seat':
    - 'cancel_seat_number': The seat to cancel, normalized to uppercase.
@@ -789,41 +797,44 @@ Today's date is: {today_iso_date}.
    - 'llm_parsed_cancel_date_iso': The single cancellation date in 'YYYY-MM-DD' format.
 
 3. For 'view_booking_history':
-   - 'history_count': The number of bookings to show (e.g., '3').
+   - No specific parameters needed
+
+--- DATE PARSING EXAMPLES ---
+If today is {today_iso_date} ({current_weekday}):
+- "next monday" → ["{(today_date + timedelta(days=(7 - today_date.weekday()) % 7 or 7)).strftime('%Y-%m-%d')}"]
+- "tomorrow" → ["{(today_date + timedelta(days=1)).strftime('%Y-%m-%d')}"]
+- "next 3 days" → ["{today_iso_date}", "{(today_date + timedelta(days=1)).strftime('%Y-%m-%d')}", "{(today_date + timedelta(days=2)).strftime('%Y-%m-%d')}"]
 
 --- RULES ---
-- IMPORTANT: Recognize the intent even if booking/cancellation details are incomplete. For example:
-  * "book a seat" → intent: "book_seat" (even without building/floor/seat details)
-  * "cancel my booking" → intent: "cancel_seat" (even without seat number/date)
-  * "show my history" → intent: "view_booking_history"
+- IMPORTANT: Recognize the intent even if booking/cancellation details are incomplete.
 - Only extract parameters from the user's LATEST message.
 - If a parameter is not mentioned in the latest message, do not include its key in the 'parameters' object.
-- Use 'general_query' only for messages completely unrelated to seat booking operations (like greetings, weather questions, etc.).
+- Use 'general_query' only for messages completely unrelated to seat booking operations.
+- For building numbers: KOR903, Kor903, aud606 → extract the numeric part (903, 606).
+- Be very precise with date calculations. Consider the current day of the week when parsing relative dates.
 
 --- EXAMPLES ---
-User message: "book a seat"
+User message: "book a seat for next monday in aud606 1st floor L1A108"
 Your output:
 {{
   "intent": "book_seat",
-  "parameters": {{}}
-}}
-
-User message: "cancel L1-004 on 10 Jun 2025"
-Your output:
-{{
-  "intent": "cancel_seat",
   "parameters": {{
-    "cancel_seat_number": "L1-004",
-    "cancel_date_description": "10 Jun 2025",
-    "llm_parsed_cancel_date_iso": "2025-06-10"
+    "booking_days_description": "next monday",
+    "llm_parsed_dates_iso_list": ["{(today_date + timedelta(days=(7 - today_date.weekday()) % 7 or 7)).strftime('%Y-%m-%d')}"],
+    "building_no": "606",
+    "floor": "1st floor",
+    "seat_number": "L1A108"
   }}
 }}
 
-User message: "cancel my booking"
+User message: "book for tomorrow"
 Your output:
 {{
-  "intent": "cancel_seat",
-  "parameters": {{}}
+  "intent": "book_seat",
+  "parameters": {{
+    "booking_days_description": "tomorrow",
+    "llm_parsed_dates_iso_list": ["{(today_date + timedelta(days=1)).strftime('%Y-%m-%d')}"]
+  }}
 }}
 """
     human_prompt_content = f"""
@@ -1060,7 +1071,6 @@ async def chat(request: ChatRequest = Body(...)):
                                             f"Please double-check the details or note that only 'Booked' status items for today or future can be cancelled.")
                         clear_user_flow_state(employee_id, "cancel_seat")
 
-
     elif current_intent == "view_booking_history":
         access_token = await get_new_access_token()
         if not access_token:
@@ -1097,24 +1107,82 @@ async def chat(request: ChatRequest = Body(...)):
         clear_user_flow_state(employee_id, "view_booking_history")
 
     elif current_intent == "book_seat":
-        required_booking_params = ["llm_parsed_dates_iso_list", "building_no", "floor", "seat_number"]
-        all_info_collected = all(field in collected_info and collected_info[field] for field in required_booking_params)
+        all_location_fields_collected = all(collected_info.get(f) for f in LOCATION_FIELDS)
+        has_booking_days = "booking_days_description" in collected_info and collected_info["booking_days_description"]
 
-        if all_info_collected:
-            parsed_dates_iso = collected_info["llm_parsed_dates_iso_list"]
-            booking_summary = f"""
-Okay, I have the following details for your booking:
-- Seat: {collected_info['seat_number'].upper()}
-- Building: {collected_info['building_no']}
-- Floor: {collected_info['floor']}
-- Dates: {format_dates_for_display(parsed_dates_iso)}
+        if all_location_fields_collected and has_booking_days:
+            llm_ack_response = await get_llm_response_for_booking(message_text, history, collected_info)
+            history.append({"role": "assistant", "content": llm_ack_response}) # LLM's ack of receiving info
 
-Do you want to proceed with this booking? (yes/no)
-"""
-            final_bot_response = booking_summary
+            current_time_for_rules = datetime.now()
+            
+            # Use LLM-parsed dates instead of manual parsing
+            parsed_dates = []
+            if "llm_parsed_dates_iso_list" in collected_info and collected_info["llm_parsed_dates_iso_list"]:
+                try:
+                    # Convert ISO date strings to datetime objects
+                    for iso_date_str in collected_info["llm_parsed_dates_iso_list"]:
+                        parsed_dates.append(datetime.fromisoformat(iso_date_str))
+                except (ValueError, TypeError) as e:
+                    print(f"Error parsing LLM dates: {e}")
+                    # Fallback: try to parse using the original function
+                    parsed_dates = parse_booking_days(collected_info["booking_days_description"])
+            else:
+                # Fallback if LLM didn't provide parsed dates
+                parsed_dates = parse_booking_days(collected_info["booking_days_description"])
+            
+            valid_dates_for_preview, user_notifications = [], []
+            offer_tomorrow_instead, offer_next_week_instead = False, False
+
+            for date_obj in parsed_dates:
+                is_today, day_name = (date_obj.date() == current_time_for_rules.date()), date_obj.strftime('%A, %d %b')
+                if date_obj.weekday() >= 5: 
+                    user_notifications.append(f"Bookings are not available on weekends. {day_name} skipped.")
+                elif is_today and date_obj.weekday() <= 3 and current_time_for_rules.hour >= 17:
+                    user_notifications.append(f"Booking for today ({day_name}) is closed (it's past 5 PM).")
+                    offer_tomorrow_instead = True
+                elif is_today and date_obj.weekday() == 4 and current_time_for_rules.hour >= 17:
+                    user_notifications.append(f"Booking for today ({day_name}) is closed (it's past 5 PM on Friday).")
+                    offer_next_week_instead = True
+                elif date_obj < current_time_for_rules.replace(hour=0, minute=0, second=0, microsecond=0):
+                    user_notifications.append(f"Cannot book for a past date: {day_name}. Skipped.")
+                else: 
+                    valid_dates_for_preview.append(date_obj)
+            
+            valid_dates_for_preview = sorted(list(set(valid_dates_for_preview)))
+            collected_info["booking_dates_iso"] = [d.isoformat() for d in valid_dates_for_preview]
             collected_info["awaiting_booking_confirmation"] = True
-        else: 
+            collected_info["offered_tomorrow"] = offer_tomorrow_instead
+            collected_info["offered_next_week"] = offer_next_week_instead
+
+            response_parts = [""]
+            if user_notifications: 
+                response_parts.append("\n" + "\n".join(user_notifications))
+            if valid_dates_for_preview:
+                preview_table = "| Date | Building | Floor | Seat Number |\n|------|----------|-------|-------------|\n"
+                for date_obj in valid_dates_for_preview:
+                    preview_table += f"| {date_obj.strftime('%d.%b.%Y')} | {collected_info['building_no']} | {collected_info['floor']} | {collected_info['seat_number']} |\n"
+                response_parts.append(f"\nHere's a summary for the valid dates based on your request:\n\n{preview_table}")
+            
+            alt_prompts = []
+            if offer_tomorrow_instead and not any(d.date() == (current_time_for_rules + timedelta(days=1)).date() for d in valid_dates_for_preview):
+                 alt_prompts.append("Would you like to book for tomorrow as well?")
+            if offer_next_week_instead: 
+                alt_prompts.append("Would you like to book for next week (Mon-Fri) instead/as well?")
+            if alt_prompts: 
+                response_parts.append("\n" + " ".join(alt_prompts))
+
+            if valid_dates_for_preview or alt_prompts: # Only ask to proceed if there's something to book or offer
+                response_parts.append("\n\n**Do you want to proceed with this booking?** (yes/no)")
+            else: # No valid dates and no alternatives offered
+                response_parts.append("\nIt seems there are no valid dates to book based on your request and current booking rules. Please try different dates or criteria.")
+                clear_user_flow_state(employee_id, "book_seat") # No further action possible here for booking
+                is_flow_complete_for_response = True
+            final_bot_response = "\n".join(response_parts)
+            is_flow_complete_for_response = False # Awaiting confirmation for booking
+        else:
             final_bot_response = await get_llm_response_for_booking(message_text, history, collected_info)
+            is_flow_complete_for_response = False
 
     elif current_intent == "general_query" or not current_intent :
         final_bot_response = "I can help you book seats, cancel bookings, or view your booking history. What would you like to do today?"
@@ -1136,4 +1204,4 @@ Do you want to proceed with this booking? (yes/no)
 
 @app.get("/")
 async def root():
-    return {"message": f"Bosch seat booking Chatbot API is running version: 3.14"}
+    return {"message": f"Bosch seat booking Chatbot API is running version: UAT-Bugfix-1.0.0"}
