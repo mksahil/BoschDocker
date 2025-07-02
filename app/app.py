@@ -450,7 +450,6 @@ def check_seat_availability(booking_info, seat_number):
                                     workspace_id=str(workspace.get('workspaceId', '')), status_name=workspace.get('statusName', ''))
     return SeatAvailability(seat_number=seat_number, is_available=False, workspace_id="", status_name="Seat not found")
 
-
 def parse_dates_fallback(message: str, today_iso_date: str) -> List[str]:
     """
     Fallback date parser for common patterns when LLM fails
@@ -752,6 +751,38 @@ def seats_match(seat1: str, seat2: str) -> bool:
     """
     return normalize_seat_number(seat1) == normalize_seat_number(seat2)
 
+# +++ NEW HELPER FUNCTION +++
+def get_allowed_buildings(associate_info: Dict[str, Any]) -> List[str]:
+    """
+    Extracts a list of allowed building numbers from the associate's API data.
+    The building numbers are keys in the 'availableSeatList' dictionaries.
+    Example keys: '903', '905' -> extracts ['903', '905'].
+    """
+    if not associate_info or 'availableSeatList' not in associate_info:
+        return []
+
+    allowed_buildings = set()
+    
+    # The availableSeatList is a list of dictionaries, one for each floor.
+    for floor_info in associate_info.get('availableSeatList', []):
+        # The keys of each floor_info dict are things like 'floor', '903', '905', etc.
+        for key in floor_info.keys():
+            # Skip non-building keys
+            if key.lower() in ['floor', 'iscob']:
+                continue
+            print("key",key)
+            # Check if the key is a building number (contains only digits)
+            if key.isdigit():
+                allowed_buildings.add(key)
+            else:
+                # Alternative: extract digits from keys like 'Kor-903'
+                match = re.search(r'\d+', key)
+                if match:
+                    allowed_buildings.add(match.group(0))
+    print("allowed_buildings",allowed_buildings)
+    return sorted(list(allowed_buildings))
+
+
 async def extract_info_with_llm(message: str, current_info: Dict[str, Any], today_iso_date: str) -> Dict[str, Any]:
     """
     Analyzes the user message to extract intent and parameters using a structured LLM prompt
@@ -876,7 +907,6 @@ Analyze the following information and provide the JSON output as specified in yo
     except Exception as e:
         print(f"General Error in extract_info_with_llm: {e}")
         return {"intent": "general_query"}
-
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest = Body(...)):
@@ -1107,6 +1137,37 @@ async def chat(request: ChatRequest = Body(...)):
         clear_user_flow_state(employee_id, "view_booking_history")
 
     elif current_intent == "book_seat":
+        # +++ START: Building and Location Validation +++
+        user_provided_building = collected_info.get("building_no")
+        if user_provided_building:
+            associate_api_info = current_conversation_data.get("associate_api_data")
+            # Fetch associate data from API if it's not already in our cache
+            if not associate_api_info:
+                access_token = await get_new_access_token()
+                if access_token:
+                    api_data = await get_associate_info(access_token, employee_id)
+                    if api_data:
+                        current_conversation_data["associate_api_data"] = api_data
+                        associate_api_info = api_data
+            
+            # If we have the associate data, perform the validation
+            if associate_api_info:
+                allowed_buildings = get_allowed_buildings(associate_api_info)
+                if allowed_buildings and user_provided_building not in allowed_buildings:
+                    # User provided a building they are not allowed to book in.
+                    allowed_buildings_str = ", ".join(allowed_buildings)
+                    final_bot_response = (
+                        f"I'm sorry, but you are not authorized to book in Building {user_provided_building}. "
+                        f"Your authorized buildings are: {allowed_buildings_str}. "
+                        "Please provide a valid building number from the list."
+                    )
+                    # Clear the invalid building number so the bot asks for it again
+                    collected_info.pop("building_no", None)
+                    
+                    history.append({"role": "assistant", "content": final_bot_response})
+                    return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=False)
+        # +++ END: Building and Location Validation +++
+
         all_location_fields_collected = all(collected_info.get(f) for f in LOCATION_FIELDS)
         has_booking_days = "booking_days_description" in collected_info and collected_info["booking_days_description"]
 
