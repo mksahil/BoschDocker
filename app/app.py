@@ -769,7 +769,7 @@ def get_allowed_buildings(associate_info: Dict[str, Any]) -> List[str]:
         for key in floor_info.keys():
             # Skip non-building keys
             if key.lower() in ['floor', 'iscob']:
-                continue
+                continue    
             print("key",key)
             # Check if the key is a building number (contains only digits)
             if key.isdigit():
