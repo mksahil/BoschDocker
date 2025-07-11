@@ -10,6 +10,8 @@ from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel
 import requests
 
+Dn4yI0dHukIc2ih6lDxHbQTUSGLLWxqprwrarERPEHQljn7d7yoxJQQJ99BFACYeBjFXJ3w3AAABACOGZwJO
+
 # FastAPI App Initialization
 app = FastAPI(title="Agile Arena Bosch Chatbot API", version="UATToken_service") # Version updated for all fixes
 
