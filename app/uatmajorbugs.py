@@ -12,6 +12,9 @@ import requests
 
 Dn4yI0dHukIc2ih6lDxHbQTUSGLLWxqprwrarERPEHQljn7d7yoxJQQJ99BFACYeBjFXJ3w3AAABACOGZwJO
 
+
+https://bosch-chartbot.azurewebsites.net/docs#/default/chat_chat_post
+
 # FastAPI App Initialization
 app = FastAPI(title="Agile Arena Bosch Chatbot API", version="UATToken_service") # Version updated for all fixes
 
