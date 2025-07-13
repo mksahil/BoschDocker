@@ -10,12 +10,17 @@ from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel
 import requests
 
+Dn4yI0dHukIc2ih6lDxHbQTUSGLLWxqprwrarERPEHQljn7d7yoxJQQJ99BFACYeBjFXJ3w3AAABACOGZwJO
+
+
+eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJITnU5TTNvNUdMNDc3MXJJeUphS0RBPT0iLCJhdWQiOlsiRWZvRTYvVGxDeDhvcWVsbFB5MUZLV3lHeXJtZytKblE2eGl1Rzk0aVRqRm1KbkFJKytCZDJJYVZNVFJjTEErciIsIkVmb0U2L1RsQ3g4b3FlbGxQeTFGS1d5R3lybWcrSm5RNnhpdUc5NGlUakZtSm5BSSsrQmQySWFWTVRSY0xBK3IiXSwibmFtZSI6IlRaWVF1bytCNXFHSmNlYWlia2x3ZWFWUjVEVE9aUmo4cUNSL3BPVWhVd05GbEl3L3B6WXVKenFjV3FuU2RvdkUiLCJnaXZlbl9uYW1lIjoiZU1nTVpSemdBenlKUXBEZ1hKUGlLZz09IiwiaWF0IjoxNzUyMjI4NTQzLCJodHRwOi8vc2NoZW1hcy5taWNyb3NvZnQuY29tL3dzLzIwMDgvMDYvaWRlbnRpdHkvY2xhaW1zL2V4cGlyYXRpb24iOiI5LzQvMjAyNiAxMDowOTowMyBBTSIsImV4cCI6MTc4ODUxNjU0M30.Hf-rjvKHGorp1ktaaVd5PRG9aNYkJ5q6kxKqZrm15e9FEvQfRIJlQBJD_NGuL8s10lhPIpR_9UmKjJw81sCp9wY5XpyBTUUAYIMaE2VMVBh2aBr-qdZrrPKaUcLgD-YzkX3waO4BIhkyfnQkLsNZVri8ufqQDw8W59Qyw_XM0-s13tgTnxq6wEfsowCvILIuMNqkvRO-rXM_LTaEvBAiGAyAga9PMmF4k9yTq-gpTtBxQpCLWL9ckU1G4e8gxlV61kQHwiY9woMjibiXv57gHnLMdJsn_UMkk7Zz9smaEtLLUVxyLrfFAzXCCijzYGRb8Rjxrhn85jWl-E0muFuaGg
+
+
+
+https://bosch-chartbot.azurewebsites.net/docs#/default/chat_chat_post
+
 # FastAPI App Initialization
-<<<<<<< HEAD
 app = FastAPI(title="Agile Arena Bosch Chatbot API", version="UATToken_service") # Version updated for all fixes
-=======
-app = FastAPI(title="Agile Arena Bosch Chatbot API", version="UAT-Bugfix-1.1.0") # Version updated for all fixes
->>>>>>> f6047f24cfab448913d22f5169b19c6496edf1b2
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,17 +33,10 @@ app.add_middleware(
 # LLM Configuration
 llm = AzureChatOpenAI(
                     azure_deployment="gpt-4o-mini",
-<<<<<<< HEAD
-                    api_key="Dn4yI0dHukIc2ih6lDxHbQTUSGLLWxqprwrarERPEHQljn7d7yoxJQQJ99BFACYeBjFXJ3w3AAABACOGZwJO", 
-                    model="gpt-4o-mini",
-                    api_version="2024-02-15-preview",
-                    azure_endpoint="https://agsopenaiservice.openai.azure.com/openai/deployments/gpt-4o-mini/chat/completions?api-version=2025-01-01-preview", 
-=======
                     api_key="", 
                     model="gpt-4o-mini",
                     api_version="2024-02-15-preview",
-                    azure_endpoint="", 
->>>>>>> f6047f24cfab448913d22f5169b19c6496edf1b2
+                    azure_endpoint="https://agsopenaiservice.openai.azure.com/openai/deployments/gpt-4o-mini/chat/completions?api-version=2025-01-01-preview", 
                     temperature=0,)
 
 # In-memory user data store
@@ -821,11 +819,7 @@ async def extract_info_with_llm(message: str, current_info: Dict[str, Any], toda
     - Be very precise with date calculations. Consider the current day of the week when parsing relative dates.
 
     --- EXAMPLES ---
-<<<<<<< HEAD
     User message: "book a seat for next monday in hydrabad 606 1st floor L1A108"
-=======
-    User message: "book a seat for next monday in aud606 1st floor L1A108"
->>>>>>> f6047f24cfab448913d22f5169b19c6496edf1b2
     Your output:
     {{
   "intent": "book_seat",
@@ -1219,11 +1213,8 @@ async def chat(
         clear_user_flow_state(employee_id, "view_booking_history")
 
     elif current_intent == "book_seat":
-<<<<<<< HEAD
         print(current_conversation_data.get("associate_api_data"))
         
-=======
->>>>>>> f6047f24cfab448913d22f5169b19c6496edf1b2
         # FIX #2: Hardened building validation logic
         user_provided_building = collected_info.get("building_no")
         if user_provided_building:
@@ -1240,22 +1231,14 @@ async def chat(
                 final_bot_response = "I'm having trouble accessing your profile to validate the building. Please try again later."
                 clear_user_flow_state(employee_id, "book_seat")
                 history.append({"role": "assistant", "content": final_bot_response})
-<<<<<<< HEAD
                 return ChatResponse(item=final_bot_response, status=True)
-=======
-                return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=True)
->>>>>>> f6047f24cfab448913d22f5169b19c6496edf1b2
 
             allowed_buildings = get_allowed_buildings(associate_api_info)
             if not allowed_buildings:
                 final_bot_response = "It seems there are no buildings assigned to your profile. Please contact support."
                 clear_user_flow_state(employee_id, "book_seat")
                 history.append({"role": "assistant", "content": final_bot_response})
-<<<<<<< HEAD
                 return ChatResponse(item=final_bot_response, status=True)
-=======
-                return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=True)
->>>>>>> f6047f24cfab448913d22f5169b19c6496edf1b2
             
             if user_provided_building not in allowed_buildings:
                 allowed_buildings_str = ", ".join(allowed_buildings)
@@ -1263,7 +1246,6 @@ async def chat(
                                       f"Your authorized buildings are: {allowed_buildings_str}. Please provide a valid building number.")
                 collected_info.pop("building_no", None)
                 history.append({"role": "assistant", "content": final_bot_response})
-<<<<<<< HEAD
                 return ChatResponse(item=final_bot_response, status=False)
         
         #  Location validation.
@@ -1301,9 +1283,6 @@ async def chat(
               collected_info.pop("location", None)  # Clear invalid location
               history.append({"role": "assistant", "content": final_bot_response})
               return ChatResponse(item=final_bot_response, status=True)
-=======
-                return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=False)
->>>>>>> f6047f24cfab448913d22f5169b19c6496edf1b2
 
         all_location_fields_collected = all(collected_info.get(f) for f in LOCATION_FIELDS)
         has_booking_days = "booking_days_description" in collected_info and collected_info["booking_days_description"]
@@ -1361,8 +1340,4 @@ async def chat(
 
 @app.get("/")
 async def root():
-<<<<<<< HEAD
     return {"message": f"Bosch seat booking Chatbot API is running version: UATToken_service"}
-=======
-    return {"message": f"Bosch seat booking Chatbot API is running version: {app.version}"}
->>>>>>> f6047f24cfab448913d22f5169b19c6496edf1b2
