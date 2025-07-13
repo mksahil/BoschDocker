@@ -3,14 +3,15 @@ import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple, Any
 import httpx
-from fastapi import FastAPI, Body, HTTPException
+from fastapi import FastAPI, Body, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel
+import requests
 
 # FastAPI App Initialization
-app = FastAPI(title="Agile Arena Bosch Chatbot API", version="UAT-Bugfix-2.0") # Version updated for all fixes
+app = FastAPI(title="Agile Arena Bosch Chatbot API", version="UATToken_service") # Version updated for all fixes
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,10 +24,10 @@ app.add_middleware(
 # LLM Configuration
 llm = AzureChatOpenAI(
                     azure_deployment="gpt-4o-mini",
-                    api_key="", 
+                    api_key="Dn4yI0dHukIc2ih6lDxHbQTUSGLLWxqprwrarERPEHQljn7d7yoxJQQJ99BFACYeBjFXJ3w3AAABACOGZwJO", 
                     model="gpt-4o-mini",
                     api_version="2024-02-15-preview",
-                    azure_endpoint="", 
+                    azure_endpoint="https://agsopenaiservice.openai.azure.com/openai/deployments/gpt-4o-mini/chat/completions?api-version=2025-01-01-preview", 
                     temperature=0,)
 
 # In-memory user data store
@@ -34,8 +35,8 @@ user_data_store: Dict[str, Dict[str, Any]] = {}
 
 # --- Pydantic Models ---
 class ChatRequest(BaseModel):
-    message: str
-    employee_id: str
+    EmployeeQueryMessage: str
+
 
 class SeatAvailability(BaseModel):
     seat_number: str
@@ -44,14 +45,13 @@ class SeatAvailability(BaseModel):
     status_name: str
 
 class ChatResponse(BaseModel):
-    employee_id: str
-    response: str
-    is_complete: bool
+    item: str
+    status: bool
 
 class BookingResult(BaseModel):
     success: bool
     message: str
-    booking_details: Optional[Dict[str, str]] = None
+    booking_details: Optional[Dict[str, Any]] = None  
 
 class DayBookingStatus(BaseModel):
     date: datetime
@@ -304,7 +304,7 @@ async def book_seat(access_token, employee_id, workspace_id, booking_date: Optio
     from_time = target_date.replace(hour=8, minute=0, second=0, microsecond=0)
     to_time = target_date.replace(hour=20, minute=0, second=0, microsecond=0)
     from_date_str, to_date_str = from_time.isoformat(), to_time.isoformat()
-
+    print("-----------------inside book_seat-----------------")
     associate_info_data = user_data_store.get(employee_id, {}).get("collected_info", {})
     associate_name = associate_info_data.get("employee_name", "AI Bot User")
     associate_email = associate_info_data.get("employee_email", "")
@@ -315,7 +315,6 @@ async def book_seat(access_token, employee_id, workspace_id, booking_date: Optio
     associate_id_val = temp_associate_info.get('associateId', 0)
     if not associate_id_val:
         return BookingResult(success=False, message="Associate ID not found. Cannot proceed with booking.")
-
 
     payload = {
         "allocationMode": 5, "associateId": associate_id_val, "bookType": 1, "createdBy": "AI bot",
@@ -331,14 +330,30 @@ async def book_seat(access_token, employee_id, workspace_id, booking_date: Optio
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers)
             booking_response = response.json()
+            print("Booking response:", booking_response)
+            print(booking_response.get('isValid', False))
             if booking_response.get('isValid', False):
-                return BookingResult(success=True, message="Seat booked successfully",
-                    booking_details={"from_date": from_date_str, "to_date": to_date_str, "workspace_id": workspace_id,
-                                     "employee_id": employee_id, "booked_date": target_date.strftime('%Y-%m-%d')})
+                print("Booking successful:inside isValid", )
+             
+                return  BookingResult(
+                    success=True, 
+                    message="Seat booked successfully",
+                    booking_details={
+                        "from_date": from_date_str, 
+                        "to_date": to_date_str, 
+                        "workspace_id": str(workspace_id),     
+                        "employee_id": str(employee_id),     
+                        "booked_date": target_date.strftime('%Y-%m-%d')
+                    }
+                )
+           
             else:
                 return BookingResult(success=False, message=f"Failed to book seat: {booking_response.get('exceptionMessage', 'Unknown error')}")
+        print("-----------------End book_seat-----------------")
     except Exception as e:
+        print("Exception in book_seat:---------------------------------------")
         return BookingResult(success=False, message=f"Error booking seat: {str(e)}")
+    
 
 async def get_booking_history(access_token: str, employee_id: str) -> List[BookingHistoryItem]:
     url = "https://associ-connec-dev-flexi-webapp01.azurewebsites.net/api/flexi/GetBookingHistory"
@@ -723,6 +738,39 @@ def get_allowed_buildings(associate_info: Dict[str, Any]) -> List[str]:
                     allowed_buildings.add(match.group(0))
     return sorted(list(allowed_buildings))
 
+def get_allowed_locations(associate_info: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Extract allowed location information from associate data.
+    Returns a dictionary with location details for validation.
+    """
+    if not associate_info:
+        return {}
+    
+    location_info = {
+        'office_location_code': associate_info.get('officeLocationCode', '').upper(),
+        'office_location_name': associate_info.get('officeLocationName', '').lower(),
+        'location_name': associate_info.get('locationName', '').lower()
+    }
+    
+    return location_info
+
+def validate_user_location(user_location: str, associate_info: Dict[str, Any]) -> bool:
+    """
+    Validate if user provided location matches their authorized location.
+    Returns True if valid, False otherwise.
+    """
+    if not user_location or not associate_info:
+        return False
+    
+    allowed_locations = get_allowed_locations(associate_info)
+    user_location_lower = user_location.lower().strip()
+    
+    # Check against all location fields
+    return (
+        user_location_lower == allowed_locations.get('office_location_name', '') or
+        user_location_lower == allowed_locations.get('location_name', '') or
+        user_location.upper() == allowed_locations.get('office_location_code', '')
+    )
 
 async def extract_info_with_llm(message: str, current_info: Dict[str, Any], today_iso_date: str) -> Dict[str, Any]:
     today_date = datetime.strptime(today_iso_date, "%Y-%m-%d")
@@ -758,6 +806,7 @@ async def extract_info_with_llm(message: str, current_info: Dict[str, Any], toda
    - 'building_no': Building number (e.g., '903', from 'Kor903' extract '903').
    - 'floor': Floor description (e.g., 'floor one','2nd floor', '1st floor'). Normalize to consistent format if possible (e.g. '1st floor').
    - 'seat_number': Seat identifier, normalized to uppercase (e.g., 'L1A108', 'L1-001').
+   - 'Location': associte officeLocationCode(KOR),officeLocationName(Koramangala),locationName(Bengaluru) (e.g., 'Bengaluru','KOR','Koramangala','Hyderabad')
 
     2. For 'cancel_seat':
    - 'cancel_seat_number': The seat to cancel, normalized to uppercase.
@@ -777,7 +826,7 @@ async def extract_info_with_llm(message: str, current_info: Dict[str, Any], toda
     - Be very precise with date calculations. Consider the current day of the week when parsing relative dates.
 
     --- EXAMPLES ---
-    User message: "book a seat for next monday in aud606 1st floor L1A108"
+    User message: "book a seat for next monday in hydrabad 606 1st floor L1A108"
     Your output:
     {{
   "intent": "book_seat",
@@ -786,7 +835,8 @@ async def extract_info_with_llm(message: str, current_info: Dict[str, Any], toda
     "llm_parsed_dates_iso_list": ["{(today_date + timedelta(days=(7 - today_date.weekday()) % 7 or 7)).strftime('%Y-%m-%d')}"],
     "building_no": "606",
     "floor": "1st floor",
-    "seat_number": "L1A108"
+    "seat_number": "L1A108",
+    "location":"hydrabad"
   }}
     }}
 
@@ -837,10 +887,148 @@ async def extract_info_with_llm(message: str, current_info: Dict[str, Any], toda
         print(f"General Error in extract_info_with_llm: {e}")
         return {"intent": "general_query"}
 
+
+# Token searvive
+# Validate Token API
+def validate_token(Authorization: str, client_id: str = "CD3054C5-6D98-47E9-BF73-43F26E8ED476") -> dict:
+    """
+    Sends a GET request to validate the token.
+
+    Args:
+        token (str): The token to be validated.
+        client_id (str): The client ID to authenticate the request.
+
+    Returns:
+        dict: Parsed JSON response from the API.
+    """
+    url = "https://dev.boschassociatearena.com/api/Token/ValidateToken"
+    headers = {
+        "Authorization": f"Bearer {Authorization}",
+        "clientID": client_id
+    }
+
+    try:
+        response = requests.get(url, headers=headers, verify=False)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return {
+            "IsSuccess": False,
+            "Message": "Request failed",
+            "ErrorMessage": str(e),
+            "ResponseData": []
+        }
+
+# Decyrpt Message
+
+def decrypt_text(text_to_decrypt: str, client_id: str = "CD3054C5-6D98-47E9-BF73-43F26E8ED476") -> str:
+    """
+    Sends a GET request to decrypt the given text.
+
+    Args:
+        text_to_decrypt (str): The encrypted text.
+        client_id (str): The client ID to be sent in the request header.
+
+    Returns:
+        str: Decrypted text if successful, else an error message.
+    """
+    url = "https://dev.boschassociatearena.com/api/Token/DecryptClientData"
+    
+    # Parameters sent in the URL
+    params = {
+        "TextToDecrypt": text_to_decrypt
+    }
+
+    # Headers including the client ID
+    headers = {
+        "clientID": client_id
+    }
+
+    try:
+        response = requests.get(url, params=params, headers=headers, verify=False)
+        response.raise_for_status()
+        return response.text  # Assuming the response is plain text
+    except requests.exceptions.RequestException as e:
+        return f"Request failed: {str(e)}"
+
+
+def parse_user_data(decrypted_data: str) -> dict:
+    """
+    Parse the decrypted user data string into a dictionary
+    Expected format: "35017285,Kasireddy Sri Vaishnavi,KASC1KOR"
+    """
+    try:
+        parts = decrypted_data.split(',')
+        if len(parts) >= 3:
+            return {
+                "employee_id": parts[0].strip(),
+                "employee_name": parts[1].strip(),
+                "employee_code": parts[2].strip()
+            }
+        else:
+            raise ValueError("Invalid user data format")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse user data: {str(e)}"
+        )
+
+from fastapi import FastAPI, Body, Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from typing import Optional
+security = HTTPBearer()
+
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest = Body(...)):
-    message_text = request.message.strip()
-    employee_id = request.employee_id
+async def chat(
+    request: ChatRequest = Body(...),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    Session_id: Optional[str] = Header(None, alias="Session_id")
+):
+    message_text = request.EmployeeQueryMessage.strip()
+    
+    authorization = credentials.credentials  # This gives you the token
+    print(f"Token: {authorization}")
+    print(f"Session ID: {Session_id}")
+
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization is required"
+        )
+    
+    try:
+        # Step 1: Validate Authorization and get encrypted data
+        encrypted_data = validate_token(authorization)
+        print(f"Encrypted data: {encrypted_data}")
+
+        response_data = encrypted_data.get('ResponseData', [])
+        if response_data and isinstance(response_data, list):
+           newdata = response_data[0]
+           print(f"New data: {newdata}")
+        else:
+           print("ResponseData is missing or empty")
+           newdata = None
+        
+        # Step 2: Decrypt the client data
+        decrypted_data =  decrypt_text(newdata)
+        print(f"Decrypted data: {newdata}")
+        
+        # Step 3: Parse user information
+        user_info = parse_user_data(decrypted_data)
+        print(f"User info: {user_info}")
+        
+        # Now you can use the user_info in your chat logic
+        # For example:
+        employee_id = 35580530
+        # employee_id = user_info["employee_id"]
+        employee_name = user_info["employee_name"]
+        employee_code = user_info["employee_code"]
+    except HTTPException:
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization is required"
+        )
+    # employee_id = request.employee_id
     today_iso_date_str = datetime.now().strftime("%Y-%m-%d")
     
     if employee_id not in user_data_store:
@@ -865,13 +1053,13 @@ async def chat(request: ChatRequest = Body(...)):
         is_flow_complete_for_response = True 
         history.append({"role": "user", "content": message_text})
         history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=is_flow_complete_for_response)
+        return  ChatResponse(item=final_bot_response, status=is_flow_complete_for_response)
 
     if message_text.lower() in GREETING_COMMANDS and not collected_info.get("intent"):
         final_bot_response = generate_initial_greeting(employee_id)
         history.append({"role": "user", "content": message_text})
         history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=False)
+        return ChatResponse(item=final_bot_response, status=is_flow_complete_for_response)
 
     # --- 2. Log User Message and Extract Intent & Parameters via LLM ---
     history.append({"role": "user", "content": message_text})
@@ -920,7 +1108,7 @@ async def chat(request: ChatRequest = Body(...)):
             final_bot_response = "I didn't quite understand. Please confirm with 'yes' or 'no' to cancel this booking."
         
         history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=is_flow_complete_for_response)
+        return ChatResponse(item=final_bot_response, status=is_flow_complete_for_response)
 
     elif collected_info.get("awaiting_booking_confirmation") and current_intent == "book_seat":
         if user_confirms:
@@ -963,7 +1151,7 @@ async def chat(request: ChatRequest = Body(...)):
             final_bot_response = "I'm sorry, I didn't catch that. Do you want to proceed with the booking? (yes/no)"
 
         history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=is_flow_complete_for_response)
+        return ChatResponse(item=final_bot_response, status=is_flow_complete_for_response)
 
     # --- 5. Main Intent Processing Logic ---
     if current_intent == "cancel_seat":
@@ -1033,6 +1221,8 @@ async def chat(request: ChatRequest = Body(...)):
         clear_user_flow_state(employee_id, "view_booking_history")
 
     elif current_intent == "book_seat":
+        print(current_conversation_data.get("associate_api_data"))
+        
         # FIX #2: Hardened building validation logic
         user_provided_building = collected_info.get("building_no")
         if user_provided_building:
@@ -1049,14 +1239,14 @@ async def chat(request: ChatRequest = Body(...)):
                 final_bot_response = "I'm having trouble accessing your profile to validate the building. Please try again later."
                 clear_user_flow_state(employee_id, "book_seat")
                 history.append({"role": "assistant", "content": final_bot_response})
-                return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=True)
+                return ChatResponse(item=final_bot_response, status=True)
 
             allowed_buildings = get_allowed_buildings(associate_api_info)
             if not allowed_buildings:
                 final_bot_response = "It seems there are no buildings assigned to your profile. Please contact support."
                 clear_user_flow_state(employee_id, "book_seat")
                 history.append({"role": "assistant", "content": final_bot_response})
-                return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=True)
+                return ChatResponse(item=final_bot_response, status=True)
             
             if user_provided_building not in allowed_buildings:
                 allowed_buildings_str = ", ".join(allowed_buildings)
@@ -1064,7 +1254,43 @@ async def chat(request: ChatRequest = Body(...)):
                                       f"Your authorized buildings are: {allowed_buildings_str}. Please provide a valid building number.")
                 collected_info.pop("building_no", None)
                 history.append({"role": "assistant", "content": final_bot_response})
-                return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=False)
+                return ChatResponse(item=final_bot_response, status=False)
+        
+        #  Location validation.
+        user_provided_location = collected_info.get("location") 
+        if user_provided_location:
+          associate_api_info = current_conversation_data.get("associate_api_data")
+          if not associate_api_info:
+              access_token = await get_new_access_token()
+              if access_token:
+                  api_data = await get_associate_info(access_token, employee_id)
+                  if api_data:
+                      current_conversation_data["associate_api_data"] = api_data
+                      associate_api_info = api_data
+        
+          if not associate_api_info:
+              final_bot_response = "I'm having trouble accessing your profile to validate the location. Please try again later."
+              clear_user_flow_state(employee_id, "book_seat")
+              history.append({"role": "assistant", "content": final_bot_response})
+              return ChatResponse(item=final_bot_response, status=True)
+
+          if not validate_user_location(user_provided_location, associate_api_info):
+              allowed_locations = get_allowed_locations(associate_api_info)
+              location_options = []
+            
+              if allowed_locations.get('office_location_name'):
+                  location_options.append(allowed_locations['office_location_name'].title())
+              if allowed_locations.get('location_name'):
+                  location_options.append(allowed_locations['location_name'].title())
+              if allowed_locations.get('office_location_code'):
+                  location_options.append(allowed_locations['office_location_code'])
+            
+              allowed_locations_str = ", ".join(location_options)
+              final_bot_response = (f"I'm sorry, but you are not authorized to book in '{user_provided_location}'. "
+                                  f"Your authorized location is: {allowed_locations_str}. Please provide a valid location.")
+              collected_info.pop("location", None)  # Clear invalid location
+              history.append({"role": "assistant", "content": final_bot_response})
+              return ChatResponse(item=final_bot_response, status=True)
 
         all_location_fields_collected = all(collected_info.get(f) for f in LOCATION_FIELDS)
         has_booking_days = "booking_days_description" in collected_info and collected_info["booking_days_description"]
@@ -1102,6 +1328,7 @@ async def chat(request: ChatRequest = Body(...)):
             final_bot_response = await get_llm_response_for_booking(message_text, history, collected_info)
             is_flow_complete_for_response = False
 
+    # General query
     elif current_intent == "general_query" or not current_intent :
         final_bot_response = "I can help you book seat (I'll need the days, building, floor, and seat number), cancel an existing booking (I'll need the seat number and specific date), or view your booking history. Please specify what you'd like to do?"
         is_flow_complete_for_response = True 
@@ -1117,8 +1344,8 @@ async def chat(request: ChatRequest = Body(...)):
         user_data_store[employee_id]["conversation_history"] = history[-MAX_HISTORY_LEN:]
 
     history.append({"role": "assistant", "content": final_bot_response})
-    return ChatResponse(employee_id=employee_id, response=final_bot_response, is_complete=is_flow_complete_for_response)
+    return ChatResponse(item=final_bot_response, status=True)
 
 @app.get("/")
 async def root():
-    return {"message": f"Bosch seat booking Chatbot API is running version:UAT bugfix 2"}
+    return {"message": f"Bosch seat booking Chatbot API is running version: UATToken_service"}
