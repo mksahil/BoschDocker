@@ -788,19 +788,18 @@ def get_allowed_buildings(associate_info: Dict[str, Any]) -> List[str]:
         return []
 
     allowed_buildings = set()
-    print("associate_info",associate_info)
+    print("associate_info", associate_info)
+    
     for floor_info in associate_info.get('availableSeatList', []):
         for key in floor_info.keys():
+            # Skip 'floor' and 'iscob' keys (case-insensitive)
             if key.lower() in ['floor', 'iscob']:
                 continue    
             
-            if key.isdigit():
-                print("key",key)
-                allowed_buildings.add(key)
-            else:
-                match = re.search(r'\d+', key)
-                if match:
-                    allowed_buildings.add(match.group(0))
+            # Any other key is considered a building identifier
+            print("key", key)
+            allowed_buildings.add(key)
+    
     return sorted(list(allowed_buildings))
 
 def get_allowed_locations(associate_info: Dict[str, Any]) -> Dict[str, str]:
