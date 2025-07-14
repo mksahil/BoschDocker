@@ -11,7 +11,7 @@ from pydantic import BaseModel
 import requests
 
 # FastAPI App Initialization
-app = FastAPI(title="Agile Arena Bosch Chatbot API", version="intent fix") # Version updated for all fixes
+app = FastAPI(title="Agile Arena Bosch Chatbot API", version="UATToken_service_TimeSlot_v2") # Version updated for all fixes
 
 app.add_middleware(
     CORSMiddleware,
@@ -269,16 +269,28 @@ async def get_new_access_token():
         return None
 
 async def get_associate_info(access_token, employee_id):
-    url = f"https://associ-connec-dev-flexi-webapp01.azurewebsites.net/api/flexi/GetAssociate?searchValue={employee_id}"
+    print("--------------------inside get associate--------------")
+    print("access_token:", access_token)
+    print("employee_id:", employee_id)
+    
+    try:
+        employee_id_clean = int(str(employee_id).strip().replace('"', '').replace("'", ''))
+    except ValueError:
+        print(f"Invalid employee_id: {employee_id}")
+        return None
+
+    url = f"https://associ-connec-dev-flexi-webapp01.azurewebsites.net/api/flexi/GetAssociate?searchValue={employee_id_clean}"
     headers = {'Authorization': f'Bearer {access_token}'}
+
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
-            if data and isinstance(data, dict) and employee_id in user_data_store:
-                user_data_store[employee_id]["collected_info"]["employee_name"] = data.get('flexibleUserName')
-                user_data_store[employee_id]["collected_info"]["employee_email"] = data.get('email')
+            print("response data:", data)
+            if data and isinstance(data, dict) and employee_id_clean in user_data_store:
+                user_data_store[employee_id_clean]["collected_info"]["employee_name"] = data.get('flexibleUserName')
+                user_data_store[employee_id_clean]["collected_info"]["employee_email"] = data.get('email')
             return data
     except Exception as e:
         print(f"Error getting associate info: {str(e)}")
@@ -776,13 +788,14 @@ def get_allowed_buildings(associate_info: Dict[str, Any]) -> List[str]:
         return []
 
     allowed_buildings = set()
-    
+    print("associate_info",associate_info)
     for floor_info in associate_info.get('availableSeatList', []):
         for key in floor_info.keys():
             if key.lower() in ['floor', 'iscob']:
                 continue    
             
             if key.isdigit():
+                print("key",key)
                 allowed_buildings.add(key)
             else:
                 match = re.search(r'\d+', key)
@@ -1000,17 +1013,33 @@ async def chat(
         raise HTTPException(status_code=401, detail="Authorization is required")
     
     try:
+        # Step 1: Validate Authorization and get encrypted data
         encrypted_data = validate_token(authorization)
-        response_data = encrypted_data.get('ResponseData', [])
-        if not (response_data and isinstance(response_data, list)):
-            raise HTTPException(status_code=401, detail="Invalid token: ResponseData is missing or empty")
+        # print(f"Encrypted data: {encrypted_data}")
 
-        decrypted_data = decrypt_text(response_data[0])
-        user_info = parse_user_data(decrypted_data)
+        response_data = encrypted_data.get('ResponseData', [])
+        if response_data and isinstance(response_data, list):
+           newdata = response_data[0]
+        #    print(f"New data: {newdata}")
+        else:
+           print("ResponseData is missing or empty")
+           newdata = None
         
-        # Using a hardcoded ID for testing as in the original code. 
-        # In production, you would use user_info["employee_id"].
-        employee_id = "35017285" 
+        # Step 2: Decrypt the client data
+        decrypted_data =  decrypt_text(newdata)
+        # print(f"Decrypted data: {newdata}")
+        
+        # Step 3: Parse user information
+        user_info = parse_user_data(decrypted_data)
+        # print(f"User info: {user_info}")
+        
+        # Now you can use the user_info in your chat logic
+        # For example:
+        # employee_id = 35017285
+        employee_id = user_info["employee_id"]
+        
+        employee_name = user_info["employee_name"]
+        employee_code = user_info["employee_code"]
         
     except HTTPException as e:
         raise e # Re-raise existing HTTPExceptions
@@ -1219,10 +1248,12 @@ async def chat(
         user_provided_building = collected_info.get("building_no")
         if user_provided_building:
             associate_api_info = current_conversation_data.get("associate_api_data")
+            print("associate_api_info:--",associate_api_info)
             if not associate_api_info:
                 access_token = await get_new_access_token()
                 if access_token:
                     api_data = await get_associate_info(access_token, employee_id)
+                    print("api_data:",api_data)
                     if api_data:
                         current_conversation_data["associate_api_data"] = api_data
                         associate_api_info = api_data
@@ -1234,6 +1265,7 @@ async def chat(
                 return ChatResponse(item=final_bot_response, status=True)
 
             allowed_buildings = get_allowed_buildings(associate_api_info)
+            print("allowed_buildings:",allowed_buildings)
             if not allowed_buildings:
                 final_bot_response = "It seems there are no buildings assigned to your profile. Please contact support."
                 clear_user_flow_state(employee_id, "book_seat")
@@ -1338,4 +1370,4 @@ async def chat(
 
 @app.get("/")
 async def root():
-    return {"message": f"Bosch seat booking Chatbot API is running version: intent fix"}
+    return {"message": f"Bosch seat booking Chatbot API is running version: {app.version}"}
