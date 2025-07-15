@@ -11,7 +11,7 @@ from pydantic import BaseModel
 import requests
 
 # FastAPI App Initialization
-app = FastAPI(title="Agile Arena Bosch Chatbot API", version="uat final 4") # Version updated for all fixes
+app = FastAPI(title="Agile Arena Bosch Chatbot API", version="uat final 3") # Version updated for all fixes
 
 app.add_middleware(
     CORSMiddleware,
@@ -658,6 +658,7 @@ def generate_initial_greeting(employee_id: str) -> str:
     greeting += "I can help you book seat (I'll need the days,booking time slot, building, floor, and seat number), cancel an existing booking (I'll need the seat number and specific date), or view your booking history. Please specify what you'd like to do?"
     return greeting
 
+
 def clear_user_flow_state(employee_id: str, intent_to_clear: Optional[str] = None):
     if employee_id not in user_data_store:
         return
@@ -693,9 +694,9 @@ async def get_llm_response_for_booking(message: str, conversation_history: List[
     missing_fields_desc = []
     
     required_booking_fields_map = {
-        "booking_days_description": "the day(s) for the booking (e.g., 'today', '16th July')",
+        "booking_days_description": "the day(s) for the booking (e.g., 'today', 'next Monday')",
         "booking_time_slot": "the time slot (e.g., 'full day', 'first half', or 'second half')",
-        "building_no": "the building number (e.g., 'ta','903')",
+        "building_no": "the building number (e.g., '903')",
         "floor": "the floor (e.g., '1st floor')",
         "seat_number": "the seat number (e.g., 'L1-001')"
     }
@@ -710,7 +711,7 @@ async def get_llm_response_for_booking(message: str, conversation_history: List[
         system_prompt_parts.append("All required information for booking has been collected. Acknowledge this briefly and state that a summary will be shown.")
     
     system_prompt_parts.extend([
-        "Your goal is to collect all information for seat booking: booking days, time slot, building number, floor, and seat number.",
+        "Your goal is to collect information for seat booking: booking days, time slot, building number, floor, and seat number.",
         "Ask only one question at a time. Be friendly but efficient.",
         "Do NOT ask for employee name or email; this is handled automatically.",
         "Do NOT ask for the booking time in hours, but ask for the slot: 'full day', 'first half', or 'second half'.",
@@ -742,20 +743,6 @@ async def get_llm_general_response(message: str, user_name: Optional[str]) -> st
     1. Booking a work seat.
     2. Cancelling a seat booking.
     3. Viewing booking history.
-    
-    **Context about the company:**
-    Bosch is a global leader in technology and services, with a focus on innovation and quality.
-    **Context about the seat booking system:**
-    This system allows employees to book, cancel, and view their seat bookings at Bosch locations.
-    **Context about the locations:**
-    Bosch has multiple office locations across various cities, each with its own set of available workspaces.
-    cities are: Coimbatore, Hyderabad, Bangalore, and Pune.
-    multiple location in each city :
-    Coimbatore: 1, 2, 3, 4, 5
-    Hyderabad: 1, 2, 3, 4, 5
-    Bangalore: koramangala(KOR), Audugudi(ADU), Electronic City(EC)
-    Pune: 1, 2, 3, 4, 5
-
 
     The user, {user_name or 'there'}, has said something that seems to be a general question, a greeting, or is outside your scope.
     Your task is to:
@@ -789,6 +776,7 @@ async def get_llm_general_response(message: str, user_name: Optional[str]) -> st
         print(f"LLM error in get_llm_general_response: {e}")
         # Fallback static response
         return "I'm sorry, I'm having a little trouble right now. I can help you book a seat, cancel a booking, or view your history. Please let me know how I can assist."
+
 
 def normalize_seat_number(seat_number: str) -> str:
     return seat_number.replace("-", "").lower()
@@ -850,7 +838,7 @@ async def extract_info_with_llm(message: str, current_info: Dict[str, Any], toda
     }
     system_prompt = f"""
     You are an expert AI assistant for a seat booking system. Your task is to analyze a user's message and conversation context, then output a single, valid JSON object.
-    
+
     The JSON object must have two keys: "intent" and "parameters".
     Today's date is: {today_iso_date} ({current_weekday}).
 
@@ -862,15 +850,16 @@ async def extract_info_with_llm(message: str, current_info: Dict[str, Any], toda
 
     --- PARAMETERS (by Intent) ---
     1. For 'book_seat':
-   - 'booking_days_description': The user's raw text for dates (e.g., 'next 3 days', 'July 15th',).
+   - 'booking_days_description': The user's raw text for dates (e.g., 'next 3 days', 'July 15th', 'next monday').
    - 'llm_parsed_dates_iso_list': A list of all dates in 'YYYY-MM-DD' format. Be very careful with date parsing:
      * "next monday" = the upcoming Monday (if today is Monday, then next Monday is 7 days away)
      * "tomorrow" = {(today_date + timedelta(days=1)).strftime('%Y-%m-%d')}
      * "today" = {today_iso_date}
-     * "this week" = remaining days of the current week (including today if applicable)
+     * "next week" = all weekdays (Mon-Fri) of next week starting from {(today_date + timedelta(days=7-today_date.weekday())).strftime('%Y-%m-%d')}
+     * "this week" = remaining weekdays of the current week (including today if applicable)
      * Date ranges: "June 9-11" becomes ["{today_date.year}-06-09", "{today_date.year}-06-10", "{today_date.year}-06-11"]
      * Always assume current year unless specified otherwise
-   - 'building_no': Building number (e.g., 'ta','903', from 'Kor903' extract '903').
+   - 'building_no': Building number (e.g., '903', from 'Kor903' extract '903').
    - 'floor': Floor description (e.g., 'floor one','2nd floor', '1st floor'). Normalize to consistent format if possible (e.g. '1st floor').
    - 'seat_number': Seat identifier, normalized to uppercase (e.g., 'L1A108', 'L1-001').
    - 'Location': associte officeLocationCode(KOR),officeLocationName(Koramangala),locationName(Bengaluru) (e.g., 'Bengaluru','KOR','Koramangala','Hyderabad')
@@ -893,24 +882,24 @@ async def extract_info_with_llm(message: str, current_info: Dict[str, Any], toda
     - Only extract parameters from the user's LATEST message. Do not carry over parameters from the conversational state unless they are being re-confirmed.
     - If a parameter is not mentioned in the latest message, do not include its key in the 'parameters' object.
     - Use 'general_query' only for messages completely unrelated to seat booking operations.
-    - For building numbers: KOR903, Kor903, aud606, kormangala 903, hydrabad 888, cobta → extract only the numeric part (903, 606,888,432).
+    - For building numbers: KOR903, Kor903, aud606, kormangala 903, hydrabad 888, cob432 → extract only the numeric part (903, 606,888,432).
     - For floor information: "floor one" or "first floor" should be extracted as "1st floor". "ground floor" as "ground floor".
     - Be very precise with date calculations. Consider the current day of the week when parsing relative dates.
 
     --- EXAMPLES ---
-    User message: "book a seat for friday morning in Coimbatore ta Floor 6A L6 - A003"
+    User message: "book a seat for next monday morning in hydrabad 606 1st floor L1A108"
     Your output:
     {{
   "intent": "book_seat",
-  "parameters": {
-    "booking_days_description": "friday",
-    "llm_parsed_dates_iso_list": ["2025-07-18"],
-    "building_no": "ta",
-    "floor": "6A",
-    "seat_number": "L6 - A003",
-    "location": "Coimbatore",
+  "parameters": {{
+    "booking_days_description": "next monday morning",
+    "llm_parsed_dates_iso_list": ["{(today_date + timedelta(days=(7 - today_date.weekday()) % 7 or 7)).strftime('%Y-%m-%d')}"],
+    "building_no": "606",
+    "floor": "1st floor",
+    "seat_number": "L1A108",
+    "location":"hydrabad",
     "booking_time_slot": "first_half"
-    }
+  }}
     }}
 
     User message: "book for tomorrow"
@@ -1385,4 +1374,4 @@ async def chat(
 
 @app.get("/")
 async def root():
-    return {"message": f"Bosch seat booking Chatbot API is running version: uatfinal4"}
+    return {"message": f"Bosch seat booking Chatbot API is running version: uatfinal3"}
