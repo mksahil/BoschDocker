@@ -1,0 +1,14 @@
+This code I put it into production.As a chatbot to book a seat ,cancel and view booking history.
+
+Now user is having lot of issues in the production..
+1. it is not able to understand the location Koramangala ,it was showing building Koramangala is not available.
+2. this chatbot should be robust and understand the user query and extract correct information and do not hallucinate.
+3. it is asking same question again and again.
+4.users does't want give the floor details based on the seat no it should understand.
+   for example if user says L0a024 then floor will be ground floor.
+5. user is giving ground floor but chatbot is not recognising it as G floor.
+6.user is giving the seat no with space l 0a34 it is not recognising the seat as l0a34.
+7.while booking it is not able to get the privious message and ask that agian.
+8.chat memory it is not able to recognise the flowup questions
+
+You do whatever changes you want in the code or use any new techniqes I'm ok with that but the system should be more robust and should work for any location,bulding,floor,seat, mainly the booking is not happening properly, bcz of the 2 main issues. 1. it is not understanding conversion flow and asking the user agin and again the same infomation.
