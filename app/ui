@@ -1,0 +1,134 @@
+# streamlit_app.py
+
+import streamlit as st
+import requests
+import uuid
+import json
+
+# --- Page Configuration ---
+st.set_page_config(page_title="Bosch Chatbot Tester", layout="wide")
+st.title("Agile Arena Bosch Chatbot UI Tester")
+st.markdown("This UI allows you to interact with your FastAPI chatbot backend.")
+
+# --- Backend Configuration ---
+# This should be the address where your FastAPI app is running
+FASTAPI_URL = "http://127.0.0.1:8000/chat"
+
+# --- Sidebar for Configuration ---
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    st.markdown(
+        "You must provide a valid **Bearer Token** to interact with the backend."
+    )
+
+    # The token is crucial for the API call to work
+    auth_token = st.text_input(
+        "Authorization Token (Bearer)",
+        type="password",
+        help="Paste the full Bearer token required by the API."
+    )
+
+    # Session ID is also required by the header in your FastAPI endpoint
+    if 'session_id' not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+
+    session_id_input = st.text_input(
+        "Session ID",
+        value=st.session_state.session_id,
+        help="A unique ID for the session. A new one is generated for each browser session."
+    )
+    # Allow user to update the session ID
+    st.session_state.session_id = session_id_input
+
+    st.markdown("---")
+    st.info(
+        "The 'New Chat' button clears the local chat history and sends a 'reset' command "
+        "to the backend to clear its conversational state for the current user."
+    )
+    if st.button("Start New Chat", use_container_width=True):
+        # Clear the local chat history
+        st.session_state.messages = []
+        # Generate a new session ID for the new chat
+        st.session_state.session_id = str(uuid.uuid4())
+        
+        # Attempt to send a "reset" command to the backend to clear its state
+        if auth_token:
+            try:
+                headers = {
+                    "Authorization": f"Bearer {auth_token}",
+                    "Session_id": st.session_state.session_id,
+                    "Content-Type": "application/json"
+                }
+                payload = {"EmployeeQueryMessage": "reset"}
+                requests.post(FASTAPI_URL, headers=headers, json=payload, timeout=20)
+            except requests.exceptions.RequestException as e:
+                st.error(f"Could not reset backend state: {e}")
+        st.rerun()
+
+# --- Chat History Initialization ---
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Hello! I am ready to test. Please enter your authorization token in the sidebar and send a message."}
+    ]
+
+# --- Display existing chat messages ---
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# --- Main Chat Input and Interaction Logic ---
+if prompt := st.chat_input("Enter your message to the bot..."):
+    # Check for required configuration before proceeding
+    if not auth_token:
+        st.warning("Please provide an Authorization Token in the sidebar to begin.")
+        st.stop()
+
+    # Add user message to session state and display it
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Prepare and send request to the FastAPI backend
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        message_placeholder.markdown("Thinking...")
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {auth_token}",
+                "Session_id": st.session_state.session_id,
+                "Content-Type": "application/json"
+            }
+            # The Pydantic model ChatRequest only expects EmployeeQueryMessage
+            payload = {"EmployeeQueryMessage": prompt}
+
+            # Define a dictionary to disable proxies for this request
+            proxies = {
+   "http": None,
+   "https": None,
+}
+
+# Add the 'proxies' argument to the post call
+            response = requests.post(FASTAPI_URL, headers=headers, json=payload, timeout=60, proxies=proxies)
+
+            # Handle different HTTP status codes from the backend
+            if response.status_code == 200:
+                response_data = response.json()
+                bot_response = response_data.get("item", "Sorry, I received an empty response.")
+                message_placeholder.markdown(bot_response)
+                st.session_state.messages.append({"role": "assistant", "content": bot_response})
+            else:
+                # Try to parse a more detailed error message from the backend
+                try:
+                    error_details = response.json().get('detail', response.text)
+                except json.JSONDecodeError:
+                    error_details = response.text
+                
+                error_message = f"**Error:** Failed to get a response. (Status: {response.status_code})\n\n**Details:**\n```\n{error_details}\n```"
+                message_placeholder.error(error_message)
+                st.session_state.messages.append({"role": "assistant", "content": error_message})
+
+        except requests.exceptions.RequestException as e:
+            error_message = f"**Connection Error:** Could not connect to the API at `{FASTAPI_URL}`.\n\nPlease ensure the FastAPI server (`main.py`) is running.\n\n**Details:** {e}"
+            message_placeholder.error(error_message)
+            st.session_state.messages.append({"role": "assistant", "content": error_message})
