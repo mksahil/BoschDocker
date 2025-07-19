@@ -12,3 +12,27 @@ Now user is having lot of issues in the production..
 8.chat memory it is not able to recognise the flowup questions
 
 You do whatever changes you want in the code or use any new techniqes I'm ok with that but the system should be more robust and should work for any location,bulding,floor,seat, mainly the booking is not happening properly, bcz of the 2 main issues. 1. it is not understanding conversion flow and asking the user agin and again the same infomation.
+
+
+
+
+Testers issue
+1.iOS & Android- When I asked the AI to book a seat in HYD3, I said "Yes," but it keeps prompting again. Could you please let me know if you'd like to book a seat, cancel a booking, or view history? (Repetitive Questions)
+2. iOS- Unable to book a seat in HYD; I tried for the 15th and 16th floors.
+3. The AI is not providing a booking confirmation despite entering correct details.
+4. When AI asks for the booking date, the user inputs "DAY After Tomorrow." The system accepts the date input and proceeds with the booking process but does not display a confirmation or error message.
+5. Including previous details even if we are providing new information.
+6. Unable to book seat in KOR and EC3
+7. Even if we book a seat thru AI, its not showing in Agile workspace.
+
+![Alt text] 
+
+
+
+
+
+
+
+
+
+
