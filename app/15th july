@@ -1,49 +1,64 @@
-import json
-import re
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple, Any
+# OPTIMISED CODE FOR BETTER ERROR HANDLING FOR EXTERNAL API'S
+
+# --- 1. Imports and Setup ---
 import httpx
-from fastapi import FastAPI, Body, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+import re
+import os
+import json
+import operator
+from datetime import datetime
+from typing import List, Dict, Optional, Any, TypedDict, Annotated
+from pydantic import BaseModel, Field
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.tools import tool
 from langchain_openai import AzureChatOpenAI
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
+import contextvars
+from fastapi import Depends, FastAPI, Body, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import asyncio
+from functools import wraps
+from time import time
+from datetime import datetime
+from typing import Dict, Optional, Any
 from pydantic import BaseModel
-import requests
+import pyodbc
+from sqlalchemy.engine import URL
+from sqlalchemy import create_engine
 
-# FastAPI App Initialization
-app = FastAPI(title="Agile Arena Bosch Chatbot API", version="uat final 3") # Version updated for all fixes
+import logging
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+logging.basicConfig(
+    level="INFO",
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# Connection string for Windows Authentication
+connection_string_windows = (
+    r'DRIVER={ODBC Driver 17 for SQL Server};'
+    r'SERVER=(local)\SQLEXPRESS;'  # Or 'localhost\InstanceName' for a named instance
+    r'DATABASE=BoschDB;'
+    r'Trusted_Connection=yes;'
 )
 
-# LLM Configuration
-# MODIFICATION: Corrected the azure_endpoint. It should be the base URL of your Azure OpenAI resource,
-# not the full path to the completions endpoint.
-llm = AzureChatOpenAI(
-                    azure_deployment="gpt-4o-mini",
-                    api_key="Dn4yI0dHukIc2ih6lDxHbQTUSGLLWxqprwrarERPEHQljn7d7yoxJQQJ99BFACYeBjFXJ3w3AAABACOGZwJO", 
-                    model="gpt-4o-mini",
-                    api_version="2024-02-15-preview",
-                    azure_endpoint="https://agsopenaiservice.openai.azure.com/", 
-                    temperature=0,)
 
-# In-memory user data store
-user_data_store: Dict[str, Dict[str, Any]] = {}
+# Connection string for SQL Server Authentication
+# connection_string_windows = (
+#     r'DRIVER={ODBC Driver 17 for SQL Server};'
+#     r'SERVER=boschserver.database.windows.net;'  # Or 'localhost\InstanceName'
+#     r'DATABASE=seatbooking;'
+#     r'UID=useradmin;'
+#     r'PWD=MDsahil@123;'
+# )
 
-# --- Pydantic Models (No changes needed) ---
+# Pydantic models
+
 class ChatRequest(BaseModel):
     EmployeeQueryMessage: str
-
-class SeatAvailability(BaseModel):
-    seat_number: str
-    is_available: bool
-    workspace_id: str
-    status_name: str
 
 class ChatResponse(BaseModel):
     item: str
@@ -52,234 +67,219 @@ class ChatResponse(BaseModel):
 class BookingResult(BaseModel):
     success: bool
     message: str
-    booking_details: Optional[Dict[str, Any]] = None  
+    booking_details: Optional[Dict[str, Any]] = None
 
 class DayBookingStatus(BaseModel):
     date: datetime
     success: bool
     message: str
-    formatted_date: Optional[str] = None
-    workspace_id: Optional[str] = None
-    details: Optional[Dict[str, str]] = None
+    details: Optional[Dict[str, Any]] = None
+    workspace_id: Optional[int] = None
+
+class SeatAvailabilityResult(BaseModel):
+    is_available: bool
+    status_name: str
+    workspace_id: Optional[int] = None
+
+class CancelResult(BaseModel):
+    success: bool
+    message: str
+    allocation_id: int
 
 class BookingHistoryItem(BaseModel):
     seat: str
     floor: str
     building: str
-    location: str
-    time: str
     bookType: int
     unitId: int
-    typeOfUnit: int
-    svgId: str
     status: int
     isAvailable: bool
-    checkInTime: Optional[str] = None
     allocationID: int
     fromDate: str
 
-class CancelResult(BaseModel):
-    success: bool
-    message: str
-    allocation_id: Optional[int] = None
+from fastapi import  HTTPException
+import requests
 
-# --- Constants (No changes needed) ---
-LOCATION_FIELDS = ["building_no", "seat_number", "floor"]
-BOOKING_INFO_FIELDS = ["booking_days_description", "booking_time_slot"]
-CANCEL_INFO_FIELDS = ["cancel_seat_number", "cancel_date_description"]
-VIEW_HISTORY_FIELDS = ["history_count"]
-RESET_COMMANDS = ["clear", "reset", "start over", "start", "new booking"]
-GREETING_COMMANDS = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
+# --- Context variable for dynamically setting employee_id per request ---
+_current_employee_id = contextvars.ContextVar("employee_id", default=None)
 
+# In-memory user data store (for associate info like name, email, associate_id_val, etc.)
+user_data_store: Dict[str, Dict[str, Any]] = {}
 
-# --- Date Helper Functions (No changes needed, assumed correct) ---
-def format_dates_for_display(dates: List[Any]) -> str:
-    if not dates: return "No dates specified"
-    
-    # Handle both datetime objects and ISO date strings
-    date_objects = []
-    for d in dates:
-        if isinstance(d, str):
+# In-memory conversation state store (for LangGraph messages history per session)
+# This remains essential for the agent's turn-by-turn conversational context.
+conversation_state_store: Dict[str, Any] = {} # Stores AgentState here
+
+# --- NEW: Database Connection and Logging Functions ---
+import pyodbc
+import asyncio
+from sqlalchemy.engine import URL
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
+
+def get_db_connection():
+    """Establishes a connection to the MSSQL database using SQLAlchemy."""
+    try:
+        connection_url = URL.create("mssql+pyodbc", query={"odbc_connect": connection_string_windows})
+        engine = create_engine(connection_url)
+        connection = engine.connect()
+        return connection
+    except (pyodbc.Error, SQLAlchemyError) as e:
+        print(f"Error connecting to the database: {e}")
+        logger.error(f"Error connecting to the database: {e}")
+        return None
+
+async def log_conversation_to_db(session_id: str, message: str, sender: str,employee_id:int):
+    """
+    Asynchronously logs a conversation message to the MSSQL database using SQLAlchemy.
+    Runs the blocking DB call in a separate thread to avoid blocking FastAPI's event loop.
+    """
+    sql = text("INSERT INTO ChatConversations (SessionID, MessageText, Sender,employee_id) VALUES (:session_id, :message, :sender,:employee_id)")
+    conn = None
+    trans = None
+    try:
+        conn = get_db_connection()
+        if conn:
+            # Run the blocking database operations in a separate thread
+            trans = await asyncio.to_thread(conn.begin)
+            await asyncio.to_thread(
+                conn.execute, 
+                sql, 
+                {"session_id": session_id, "message": message, "sender": sender,"employee_id":employee_id}
+            )
+            await asyncio.to_thread(trans.commit)
+            print(f"Successfully logged message for SessionID: {session_id} and employee_id {employee_id}" )
+            logger.info(f"Successfully logged message for SessionID: {session_id} and employee_id {employee_id}" )
+    except (pyodbc.Error, SQLAlchemyError) as e:
+        # Log the error but don't crash the main application
+        print(f"Database Error: Could not log message for SessionID {session_id}. Error: {e}")
+        logger.info(f"Database Error: Could not log message for SessionID {session_id}. Error: {e}")
+        if trans:
             try:
-                date_objects.append(datetime.fromisoformat(d.split('T')[0]))
-            except ValueError:
-                continue # Skip if string is not a valid date format
-        elif isinstance(d, datetime):
-            date_objects.append(d)
+                await asyncio.to_thread(trans.rollback)
+            except Exception as rollback_error:
+                print(f"Error during rollback: {rollback_error}")
+                logger.error(f"Error during rollback: {rollback_error}")
+    finally:
+        if conn:
+            conn.close()
 
-    if not date_objects: return "Invalid date format provided"
-
-    date_objects = sorted(list(set(date_objects)))
-    display_format_dates = [d.strftime('%B %d, %Y') for d in date_objects]
-    if len(date_objects) == 1: return f"Single day: {display_format_dates[0]}"
-    return f"Multiple days ({len(date_objects)}): {', '.join(display_format_dates)}"
-
-def format_date_for_table(date_obj: datetime) -> str:
-    return date_obj.strftime('%d.%b.%Y')
-
-def parse_booking_days(booking_days_description: str) -> List[datetime]:
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    result_dates = []
-    description = booking_days_description.lower().strip()
-
-    # today and next X days
-    today_and_next_pattern = re.search(r"today and next (\d+) days?", description)
-    if today_and_next_pattern:
-        days_count = int(today_and_next_pattern.group(1))
-        result_dates.append(today)
-        for i in range(1, days_count + 1): result_dates.append(today + timedelta(days=i))
-        return result_dates
-
-    # next X days (implicitly includes today if today is a weekday and not past)
-    next_days_pattern = re.search(r"next (\d+) days?", description)
-    if next_days_pattern:
-        days_count = int(next_days_pattern.group(1))
-        # Start from today
-        for i in range(days_count): result_dates.append(today + timedelta(days=i))
-        return result_dates
-    
-    if "this week" in description:
-        start_of_week = today - timedelta(days=today.weekday()) # Monday of current week
-        for i in range(5): # Monday to Friday
-            day_in_week = start_of_week + timedelta(days=i)
-            if day_in_week >= today: # Only include today or future days
-                result_dates.append(day_in_week)
-        if result_dates: return sorted(list(set(result_dates)))
-
-    if "next week" in description:
-        start_of_next_week = today - timedelta(days=today.weekday()) + timedelta(weeks=1) # Monday of next week
-        for i in range(5): # Monday to Friday
-            result_dates.append(start_of_next_week + timedelta(days=i))
-        return sorted(list(set(result_dates)))
-
-    day_mapping = {
-        "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "tues": 1,
-        "wednesday": 2, "wed": 2, "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
-        "friday": 4, "fri": 4, "saturday": 5, "sat": 5, "sunday": 6, "sun": 6
+from tenacity import retry, stop_after_attempt, wait_exponential,retry_if_exception_type
+import httpx
+# --- Token service functions  ---
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=60), # Waits 2s, 4s, 8s...
+    stop=stop_after_attempt(5), # Retries up to 5 times
+    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)) # Retry on network or server errors
+)
+def validate_token(Authorization: str, client_id: str = "CD3054C5-6D98-47E9-BF73-43F26E8ED476") -> dict:
+    url = "https://boschassociatearena.com/api/Token/ValidateToken"
+    headers = {
+        "Authorization": f"Bearer {Authorization}",
+        "clientID": client_id
     }
-    # Day range e.g. "Monday to Wednesday"
-    day_range_pattern = re.search(r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\s+(?:to|-)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)", description)
-    if day_range_pattern:
-        start_day_name, end_day_name = day_range_pattern.group(1), day_range_pattern.group(2)
-        start_day, end_day = day_mapping.get(start_day_name), day_mapping.get(end_day_name)
+    try:
+        response = requests.get(url, headers=headers, verify=False)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return {
+            "IsSuccess": False,
+            "Message": "Request failed",
+            "ErrorMessage": str(e),
+            "ResponseData": []
+        }
 
-        if start_day is not None and end_day is not None:
-            days_until_start = (start_day - today.weekday() + 7) % 7
-            start_date = today + timedelta(days=days_until_start)
-            
-            current_loop_day = start_day
-            day_offset_count = 0
-            while True:
-                result_dates.append(start_date + timedelta(days=day_offset_count))
-                if current_loop_day == end_day:
-                    break
-                current_loop_day = (current_loop_day + 1) % 7
-                day_offset_count += 1
-                if day_offset_count > 14: break # Safety break for long/invalid ranges
-            return result_dates if result_dates else [] # fallback to empty list if range parsing yields nothing
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=60), # Waits 2s, 4s, 8s...
+    stop=stop_after_attempt(5), # Retries up to 5 times
+    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)) # Retry on network or server errors
+)
+def decrypt_text(text_to_decrypt: str, client_id: str = "CD3054C5-6D98-47E9-BF73-43F26E8ED476") -> str:
+    url = "https://boschassociatearena.com/api/Token/DecryptClientData"
+    params = {"TextToDecrypt": text_to_decrypt}
+    headers = {"clientID": client_id}
+    try:
+        response = requests.get(url, params=params, headers=headers, verify=False)
+        response.raise_for_status()
+        return response.text
+    except requests.exceptions.RequestException as e:
+        return f"Request failed: {str(e)}"
 
-    # Specific dates "15th July", "July 15", "15th of July"
-    current_year = today.year
-    current_month = today.month
-    date_pattern = r"(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
-    month_mapping = {"january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3, "april": 4, "apr": 4, "may": 5,
-                     "june": 6, "jun": 6, "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sep": 9,
-                     "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12}
-    
-    found_specific_dates = False
-    reference_month = None
+def parse_user_data(decrypted_data: str) -> dict:
+    try:
+        # print("print parse user data")
+        parts = decrypted_data.split(',')
+        # print("parts",parts)
+        if len(parts) >= 3:
+            return {
+                "employee_id": parts[0].strip(),
+                "employee_name": parts[1].strip(),
+                "employee_code": parts[2].strip()
+            }
+        else:
+            raise ValueError("Invalid user data format")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse user data: {str(e)}"
+        )
 
-    matches = list(re.finditer(date_pattern, description))
-    for match in matches:
-        day = int(match.group(1))
-        month_name = match.group(2)
-        month = month_mapping.get(month_name.lower())
-        if month and 1 <= day <= 31:
-            target_year = current_year
-            if month < current_month or (month == current_month and day < today.day):
-                target_year = current_year + 1
-            
-            try:
-                date_obj = datetime(year=target_year, month=month, day=day)
-                if date_obj not in result_dates: result_dates.append(date_obj)
-                reference_month = month
-                found_specific_dates = True
-            except ValueError:
-                pass
-    
-    if not found_specific_dates or (found_specific_dates and re.search(r",\s*(\d{1,2})(?:st|nd|rd|th)?(?!\s+(?:of\s+)?(?:jan|feb|...))", description)):
-        effective_month = reference_month if reference_month else current_month
+# API Helper functions
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+import httpx
 
-        for day_match in re.finditer(r"\b(\d{1,2})(?:st|nd|rd|th)?\b", description):
-            is_part_of_full_date = False
-            for m in matches:
-                if m.start() <= day_match.start() and m.end() >= day_match.end():
-                    is_part_of_full_date = True
-                    break
-            if is_part_of_full_date:
-                continue
-
-            day = int(day_match.group(1))
-            if 1 <= day <= 31:
-                target_year, target_month = current_year, effective_month
-                try: temp_date_obj = datetime(year=target_year, month=target_month, day=day)
-                except ValueError: continue
-
-                if temp_date_obj < today:
-                    target_month +=1
-                    if target_month > 12:
-                        target_month, target_year = 1, target_year + 1
-                
-                try:
-                    date_obj = datetime(year=target_year, month=target_month, day=day)
-                    if date_obj not in result_dates: result_dates.append(date_obj)
-                    found_specific_dates = True
-                except ValueError:
-                    pass
-                        
-    if found_specific_dates:
-        return sorted(list(set(result_dates)))
-
-    # Fallbacks if no other patterns matched
-    if not result_dates:
-        if "today" in description:
-            result_dates.append(today)
-        elif "tomorrow" in description:
-            result_dates.append(today + timedelta(days=1))
-            
-    return sorted(list(set(result_dates)))
-
-
-# --- API Helper Functions (No changes needed)---
+# Apply the decorator to a function that makes a network call
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=60), # Waits 2s, 4s, 8s...
+    stop=stop_after_attempt(5), # Retries up to 5 times
+    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)) # Retry on network or server errors
+)
 async def get_new_access_token():
-    url = "https://associ-connec-dev-flexi-webapp01.azurewebsites.net/connect/token"
+    """Fetches a new access token from the authentication server."""
+    url = "https://flexibook.boschassociatearena.com/connect/token"
     payload = {
         'client_id': 'C851F411-2BFA-4578-A4EF-D420EC6CBB64',
         'client_secret': '90D18C4E-32E1-4DBF-B30F-CC91F47ADCF6',
-        'grant_type': 'password', 'username': '11446688'
+        'grant_type': 'password', 'username': '11446688' # This username might also need to be dynamic for real scenarios
     }
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, data=payload, headers=headers)
             response.raise_for_status()
-            return response.json().get('access_token')
+            token = response.json().get('access_token')
+            print("Successfully retrieved Flexibook access token.")
+            logger.info("Successfully retrieved Flexibook access token.")
+
+            return token
     except Exception as e:
-        print(f"Error getting new access token: {str(e)}")
+        print(f"Error getting new Flexibook access token: {str(e)}")
         return None
 
-async def get_associate_info(access_token, employee_id):
-    print("--------------------inside get associate--------------")
-    print("access_token:", access_token)
-    print("employee_id:", employee_id)
-    
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=60), # Waits 2s, 4s, 8s...
+    stop=stop_after_attempt(5), # Retries up to 5 times
+    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)) # Retry on network or server errors
+)
+async def get_associate_info(access_token, employee_id_param: Optional[str] = None):
+    """Gets associate information using their employee ID."""
+    employee_id = employee_id_param or _current_employee_id.get()
+    if not employee_id:
+        raise ValueError("Employee ID not available in context or provided.")
+
+    print(f"Fetching info for employee_id: {employee_id}")
+    logger.info(f"Fetching info for employee_id: {employee_id}")
+
     try:
         employee_id_clean = int(str(employee_id).strip().replace('"', '').replace("'", ''))
     except ValueError:
         print(f"Invalid employee_id: {employee_id}")
+        logger.error(f"Invalid employee_id: {employee_id}")
+
         return None
 
-    url = f"https://associ-connec-dev-flexi-webapp01.azurewebsites.net/api/flexi/GetAssociate?searchValue={employee_id_clean}"
+    url = f"https://flexibook.boschassociatearena.com/api/flexi/GetAssociate?searchValue={employee_id_clean}"
     headers = {'Authorization': f'Bearer {access_token}'}
 
     try:
@@ -287,88 +287,258 @@ async def get_associate_info(access_token, employee_id):
             response = await client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
-            print("response data:", data)
-            if data and isinstance(data, dict) and employee_id_clean in user_data_store:
-                user_data_store[employee_id_clean]["collected_info"]["employee_name"] = data.get('flexibleUserName')
-                user_data_store[employee_id_clean]["collected_info"]["employee_email"] = data.get('email')
+            # Store user details in user_data_store keyed by employee_id
+            if data and isinstance(data, dict):
+                 user_data_store[employee_id] = {
+                     "collected_info": {
+                         "employee_name": data.get('flexibleUserName'),
+                         "employee_email": data.get('email'),
+                         "associate_id_val": data.get('associateId')
+                     },
+                     "associate_api_data": data # Store full data for unit_id extraction later
+                 }
+            print(f"Successfully fetched associate info for {employee_id}.")
+            logger.info(f"Successfully fetched associate info for {employee_id}.")
+
             return data
     except Exception as e:
         print(f"Error getting associate info: {str(e)}")
+        logger.error(f"Error getting associate info: {str(e)}")
+
         return None
 
+def extract_unit_id(associate_info, building_name, floor):
+    print("----------------------------inside extract_unit_id------------------")
+    # print("associate_info:",associate_info)
+    print("--------------building_name----------",building_name)
+    print("--------------floor----------",floor)
+    if not associate_info or 'availableSeatList' not in associate_info:
+        return None
+    floor_word_to_number = {
+        "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+        "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+        "ground": "0", "first": "1", "second": "2", "third": "3",
+        "fourth": "4", "forth": "4", "fifth": "5"
+    }
+    normalized_floor = floor.lower().strip()
+    for word, number in floor_word_to_number.items():
+       normalized_floor = re.sub(rf'\b{word}\b', number, normalized_floor)
+    normalized_floor = re.sub(r'\b(floor|fl|f)\b', '', normalized_floor, flags=re.IGNORECASE).strip()
+    normalized_floor = re.sub(r'\b(no|number|#)\b', '', normalized_floor, flags=re.IGNORECASE).strip()
+    normalized_floor = re.sub(r'(st|nd|rd|th)\b', '', normalized_floor).strip()
+
+    print("normalized_floor:", normalized_floor)
+    if normalized_floor in ['g', 'ground', '0']:
+       possible_formats = ["G Floor", "G", "Ground Floor", "Ground", "0"]
+    else:
+      possible_formats = [
+        f"Floor {normalized_floor}", f"{normalized_floor} Floor",
+        f"F{normalized_floor}", f"{normalized_floor}"
+      ]
+    print("Looking for floor formats:", possible_formats)
+    available_floors = [f['floor'] for f in associate_info.get('availableSeatList', [])]
+    print("Available floors in API response:", available_floors)
+    logger.info(f"Available floors in API response: {available_floors}")
+
+    for floor_info in associate_info['availableSeatList']:
+        floor_name = floor_info['floor'].lower()
+        if any(format.lower() == floor_name for format in possible_formats):
+            print(f"Found matching floor: {floor_info['floor']}")
+            logger.info(f"Found matching floor: {floor_info['floor']}")
+            print(":::::::::::::::::::::::::::::::floor info::::::::::::::::::::::::",floor_info)
+            print("building_name in floor_info",building_name in floor_info)
+            print("floor_info[building_name]",floor_info[building_name])
+            if building_name in floor_info:
+                value = floor_info[building_name]
+                match = re.search(r"/space/flex/\d+/(\d+)\?", value)
+                print("match:",match)
+                if match: return match.group(1)
+    for floor_info in associate_info['availableSeatList']:
+        floor_digits = re.search(r'\d+', floor_info['floor'])
+        if floor_digits and floor_digits.group(0) == normalized_floor:
+            print(f"Found floor by number match: {floor_info['floor']}")
+            print("line 274 building_name:", building_name)
+            building_name= floor_info.get(building_name.lower(), None)
+            print("line 276 building_name:", building_name)
+            if(building_name):
+              print("floor_info:", floor_info[building_name.lower()])
+              print(" line 279 building_name:", building_name)
+              if building_name.lower() in floor_info:
+                   value = building_name
+                   print("value:",value)
+                   match = re.search(r"/space/flex/\d+/(\d+)\?", value)
+                   if match: return match.group(1)
+    return None
+
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=60), # Waits 2s, 4s, 8s...
+    stop=stop_after_attempt(5), # Retries up to 5 times
+    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)) # Retry on network or server errors
+)
 async def get_floor_booking_info(access_token: str, unit_id: str, date_to_check: datetime):
+    """Gets booking information for a floor (unit) on a specific date."""
+    print(f"Getting booking info for unit {unit_id} on {date_to_check.strftime('%Y-%m-%d')}")
+    logger.info(f"Getting booking info for unit {unit_id} on {date_to_check.strftime('%Y-%m-%d')}")
     formatted_date_for_api = date_to_check.strftime("%Y%%2F%m%%2F%d")
-    url = f"https://associ-connec-dev-flexi-webapp01.azurewebsites.net/api/Flexi/GetBookingForWeb4Days?unitId={unit_id}&typeID=5&dateCheck={formatted_date_for_api}"
+    print("line 291 ",formatted_date_for_api)
+    url = f"https://flexibook.boschassociatearena.com/api/Flexi/GetBookingForWeb4Days?unitId={unit_id}&typeID=5&dateCheck={formatted_date_for_api}"
     headers = {'Authorization': f'Bearer {access_token}'}
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=headers)
+            print(":::::::::::::::::::::::::get_floor_booking_info response::::::::::::::::::::::::",response)
+            import json
+            # print("line 392",json.dumps(response.json(), indent=4))
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            print("Successfully fetched floor booking info.")
+            logger.info(f"Successfully fetched floor booking info for unit {unit_id} on {date_to_check.strftime('%Y-%m-%d')}")
+            return data
     except Exception as e:
-        print(f"Error getting booking info for unit {unit_id} on {date_to_check.strftime('%Y-%m-%d')}: {str(e)}")
+        print(f"line 399 Error getting booking info for unit {unit_id}: {str(e)}")
+        logger.error(f"Error getting booking info for unit {unit_id}: {str(e)}")
         return None
 
-async def book_seat(access_token, employee_id, workspace_id, booking_date: Optional[datetime] = None, time_slot: str = 'full_day'):
-    url = "https://associ-connec-dev-flexi-webapp01.azurewebsites.net/api/flexi/book4Days"
-    target_date = booking_date if booking_date else datetime.now()
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=60), # Waits 2s, 4s, 8s...
+    stop=stop_after_attempt(5), # Retries up to 5 times
+    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)) # Retry on network or server errors
+)
+async def book_seat(access_token, employee_id_param: Optional[str], workspace_id, booking_date: datetime, time_slot: str = 'full_day'):
+    """Books a specific seat for an employee."""
+    employee_id = employee_id_param or _current_employee_id.get()
+    if not employee_id:
+        raise ValueError("Employee ID not available in context or provided for booking.")
+
+    # print(f"--- Attempting to book seat for {employee_id} ---")
+    logger.info(f"Attempting to book seat for employee {employee_id} on {booking_date.strftime('%Y-%m-%d')} at {time_slot}")
+    logger.info(f"Workspace ID: {workspace_id}, Booking Date: {booking_date.strftime('%Y-%m-%d')}, Time Slot: {time_slot}")
+    url = "https://flexibook.boschassociatearena.com/api/flexi/book4Days"
     
+    bookType = 1 # Full Day
     if time_slot == 'first_half':
-        from_time = target_date.replace(hour=8, minute=0, second=0, microsecond=0)
-        to_time = target_date.replace(hour=12, minute=0, second=0, microsecond=0)
+        bookType = 2
     elif time_slot == 'second_half':
-        from_time = target_date.replace(hour=13, minute=0, second=0, microsecond=0)
-        to_time = target_date.replace(hour=20, minute=0, second=0, microsecond=0)
-    else:  # Default to 'full_day'
-        from_time = target_date.replace(hour=8, minute=0, second=0, microsecond=0)
-        to_time = target_date.replace(hour=20, minute=0, second=0, microsecond=0)
+        bookType = 3
+        
+    from_time = booking_date.replace(hour=8, minute=0, second=0, microsecond=0)
+    to_time = booking_date.replace(hour=20, minute=0, second=0, microsecond=0)
+    if time_slot == 'first_half':
+        to_time = booking_date.replace(hour=12, minute=0)
+    elif time_slot == 'second_half':
+        from_time = booking_date.replace(hour=13, minute=0)
         
     from_date_str, to_date_str = from_time.isoformat(), to_time.isoformat()
-
+    
     associate_info_data = user_data_store.get(employee_id, {}).get("collected_info", {})
     associate_name = associate_info_data.get("employee_name", "AI Bot User")
     associate_email = associate_info_data.get("employee_email", "")
+    associate_id_val = associate_info_data.get("associate_id_val")
 
-    temp_associate_info = await get_associate_info(access_token, employee_id)
-    if not temp_associate_info:
-         return BookingResult(success=False, message="Failed to retrieve associate information for booking.")
-    associate_id_val = temp_associate_info.get('associateId', 0)
     if not associate_id_val:
-        return BookingResult(success=False, message="Associate ID not found. Cannot proceed with booking.")
+        # Fallback if associate info wasn't pre-fetched or retrieved for this employee_id
+        temp_associate_info = await get_associate_info(access_token, employee_id) # Pass employee_id
+        if temp_associate_info:
+            associate_id_val = user_data_store.get(employee_id, {}).get("collected_info", {}).get("associate_id_val")
+        else:
+             return BookingResult(success=False, message="Critical error: Could not retrieve associate ID.")
 
     payload = {
-        "allocationMode": 5, "associateId": associate_id_val, "bookType": 1, "createdBy": "AI bot",
-        "Email": associate_email, "employeeNumber": (employee_id), "exceptionMessage": "", "from": "",
+        "allocationMode": 5, "associateId": associate_id_val, "bookType": bookType,
+        "Email": associate_email, "employeeNumber": employee_id, "from": "",
         "fromDate": from_date_str, "isMovingHere": False, "isValid": False, "modifiedBy": "AI bot",
-        "remark": "seat booked by AI", "selectedBusinessUnitCode": "", "selectedBusinessUnitId": 0,
-        "selectedDepartmentCode": "", "selectedDepartmentId": 0, "selectedSectionCode": "",
-        "selectedSectionId": 0, "to": "", "toDate": to_date_str, "toName": associate_name,
+        "remark": "Seat booked by LangGraph AI", "to": "", "toDate": to_date_str, "toName": associate_name,
         "workspaceId": int(workspace_id)
     }
+    
     headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
             booking_response = response.json()
+            print("booking_response:",booking_response)
+            logger.info(f"Booking response for employee {employee_id}: {booking_response}")
             if booking_response.get('isValid', False):
-                return  BookingResult(
-                    success=True, 
-                    message="Seat booked successfully",
-                    booking_details={
-                        "from_date": from_date_str, 
-                        "to_date": to_date_str, 
-                        "workspace_id": str(workspace_id),     
-                        "employee_id": str(employee_id),     
-                        "booked_date": target_date.strftime('%Y-%m-%d')
-                    }
+                print("Booking successful via API.")
+                logger.info(f"Booking successful for employee {employee_id} on {booking_date.strftime('%Y-%m-%d')} at {time_slot}")
+                return BookingResult(
+                    success=True, message="Seat booked successfully!",
+                    booking_details={"workspace_id": workspace_id, "date": booking_date.strftime('%Y-%m-%d'), "time_slot": time_slot}
                 )
             else:
-                return BookingResult(success=False, message=f"Failed to book seat: {booking_response.get('exceptionMessage', 'Unknown error')}")
+                error_msg = booking_response.get('exceptionMessage', 'Unknown error from booking API')
+                print(f"Booking failed: {error_msg}")
+                logger.error(f"Booking failed for employee {employee_id}: {error_msg}")
+                return BookingResult(success=False, message=f"Failed to book seat: {error_msg}")
     except Exception as e:
-        return BookingResult(success=False, message=f"Error booking seat: {str(e)}")
+        print(f"Exception during booking: {str(e)}")
+        logger.error(f"Exception during booking for employee {employee_id}: {str(e)}")
+        return BookingResult(success=False, message=f"An exception occurred while booking: {str(e)}")
 
-async def get_booking_history(access_token: str, employee_id: str) -> List[BookingHistoryItem]:
-    url = "https://associ-connec-dev-flexi-webapp01.azurewebsites.net/api/flexi/GetBookingHistory"
+def check_seat_availability(floor_booking_data: Dict[str, Any], seat_number: str) -> SeatAvailabilityResult:
+    """Checks if a specific seat is available from floor booking data."""
+    if not floor_booking_data or "asscocicateInfoList" not in floor_booking_data:
+        return SeatAvailabilityResult(is_available=False, status_name="Data not found")
+    print(" line 486 :::::::::::::::::check seat availability called::::::::::::::::::::::::::::")
+    logger.info(f"Checking seat availability for seat number: {seat_number}")
+    # print("line 381 floor_booking_data ",floor_booking_data["asscocicateInfoList"])
+    workspaceName=""
+    for seat in floor_booking_data["asscocicateInfoList"]:
+        # print("line 383  :::::::::::seat:::::::::::",seat)
+        # print("line 384", seat.get("worspaceName", ""), seat_number)
+        workspaceName=seat.get("worspaceName", "")
+        print("workspace name:",workspaceName)
+        logger.info(f"Checking seat: {workspaceName} against requested seat number: {seat_number}")
+        print("seat number",seat_number)
+        print(" Is worksapce name is null",workspaceName=='null')
+        print(" Is worksapce name is None",workspaceName==None)
+        if workspaceName!='null' and  workspaceName!=None:
+            if workspaceName.lower()== seat_number.lower():
+             print("  seat name matched")
+             logger.info(f"Seat {workspaceName} matched with requested seat number: {seat_number}")
+             if seat.get("workspaceStatusId") == 1: # 1 means available
+                logger.info(f"Seat {workspaceName} is available.")
+                return SeatAvailabilityResult(
+                    is_available=True,
+                    status_name="Available",
+                    workspace_id=seat.get("workspaceId")
+                )
+             else: # Other statuses: booked, blocked etc.
+                logger.info(f"Seat {workspaceName} is not available. Status ID: {seat.get('workspaceStatusId')}")
+                return SeatAvailabilityResult(is_available=False, status_name="Not Available")
+        else:
+            print("workspace name is ethire null or none")
+    print("workspaceNames",workspaceName)
+    return SeatAvailabilityResult(is_available=False, status_name="Seat not found")
+
+def format_booking_results_table(results: List[DayBookingStatus]) -> str:
+    """Formats booking results into a markdown table."""
+    if not results:
+        return "No booking attempts were made."
+        
+    header = "| Date       | Status    | Details                                  |"
+    separator = "|------------|-----------|------------------------------------------|"
+    rows = [header, separator]
+    
+    for res in results:
+        status_icon = "✅ Success" if res.success else "❌ Failed"
+        rows.append(f"| {res.date.strftime('%Y-%m-%d')} | {status_icon} | {res.message} |")
+        
+    return "\n".join(rows)
+
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=60), # Waits 2s, 4s, 8s...
+    stop=stop_after_attempt(5), # Retries up to 5 times
+    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)) # Retry on network or server errors
+)
+async def get_booking_history(access_token: str, employee_id_param: Optional[str]) -> List[BookingHistoryItem]:
+    """Retrieves the booking history for an employee."""
+    employee_id = employee_id_param or _current_employee_id.get()
+    if not employee_id:
+        raise ValueError("Employee ID not available in context or provided for history.")
+
+    url = "https://flexibook.boschassociatearena.com/api/flexi/GetBookingHistory"
     payload = {"keySearch": employee_id, "pageIndex": 1, "pageSize": 50}
     headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
     try:
@@ -376,13 +546,21 @@ async def get_booking_history(access_token: str, employee_id: str) -> List[Booki
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             history_data = response.json()
+            logger.info(f"Successfully fetched booking history for employee {employee_id}.")
             return [BookingHistoryItem(**item) for item in history_data]
     except Exception as e:
         print(f"Error getting booking history for employee {employee_id}: {str(e)}")
+        logger.error(f"Error getting booking history for employee {employee_id}: {str(e)}")
         return []
 
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=60), # Waits 2s, 4s, 8s...
+    stop=stop_after_attempt(5), # Retries up to 5 times
+    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)) # Retry on network or server errors
+)
 async def cancel_booking_api(access_token: str, allocation_id: int) -> CancelResult:
-    url = f"https://associ-connec-dev-flexi-webapp01.azurewebsites.net/api/flexi/Cancel?allocationId={allocation_id}"
+    """The core API call to cancel a booking."""
+    url = f"https://flexibook.boschassociatearena.com/api/flexi/Cancel?allocationId={allocation_id}"
     headers = {'Authorization': f'Bearer {access_token}'}
     try:
         async with httpx.AsyncClient() as client:
@@ -412,398 +590,47 @@ async def cancel_booking_api(access_token: str, allocation_id: int) -> CancelRes
     except Exception as e:
         return CancelResult(success=False, message=f"Error cancelling booking: {str(e)}", allocation_id=allocation_id)
 
-def extract_unit_id(associate_info, building_no, floor):
-    if not associate_info or 'availableSeatList' not in associate_info:
-        return None
-    floor_word_to_number = {
-        "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
-        "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
-        "ground": "0", "first": "1", "second": "2", "third": "3",
-        "fourth": "4", "forth": "4", "fifth": "5"
-    }
-    normalized_floor = floor.lower().strip()
-    for word, number in floor_word_to_number.items():
-       normalized_floor = re.sub(rf'\b{word}\b', number, normalized_floor)
-    normalized_floor = re.sub(r'\b(floor|fl|f)\b', '', normalized_floor, flags=re.IGNORECASE).strip()
-    normalized_floor = re.sub(r'\b(no|number|#)\b', '', normalized_floor, flags=re.IGNORECASE).strip()
-    normalized_floor = re.sub(r'(st|nd|rd|th)\b', '', normalized_floor).strip()
+def seats_match(seat1: str, seat2: str) -> bool:
+    """Compares two seat numbers for a match, ignoring case and whitespace."""
+    return re.sub(r'\s*-\s*', '-', seat1.strip().upper()) == re.sub(r'\s*-\s*', '-', seat2.strip().upper())
 
-    print("normalized_floor:", normalized_floor)
-    if normalized_floor in ['g', 'ground', '0']:
-       possible_formats = ["G Floor", "G", "Ground Floor", "Ground", "0"]
-    else:
-      possible_formats = [
-        f"Floor {normalized_floor}", f"{normalized_floor} Floor",
-        f"F{normalized_floor}", f"{normalized_floor}"
-      ]
-    print("Looking for floor formats:", possible_formats)
-    available_floors = [f['floor'] for f in associate_info.get('availableSeatList', [])]
-    print("Available floors in API response:", available_floors)
+# --- 3. LangGraph Agent Implementation ---
 
-    for floor_info in associate_info['availableSeatList']:
-        floor_name = floor_info['floor'].lower()
-        if any(format.lower() == floor_name for format in possible_formats):
-            print(f"Found matching floor: {floor_info['floor']}")
-            if building_no in floor_info:
-                value = floor_info[building_no]
-                match = re.search(r"/space/flex/\d+/(\d+)\?", value)
-                if match: return match.group(1)
-    for floor_info in associate_info['availableSeatList']:
-        floor_digits = re.search(r'\d+', floor_info['floor'])
-        if floor_digits and floor_digits.group(0) == normalized_floor:
-            print(f"Found floor by number match: {floor_info['floor']}")
-            if building_no in floor_info:
-                value = floor_info[building_no]
-                match = re.search(r"/space/flex/\d+/(\d+)\?", value)
-                if match: return match.group(1)
-    return None
-
-def check_seat_availability(booking_info, seat_number):
-    if not booking_info or 'asscocicateInfoList' not in booking_info: return None
-    normalized_seat = seat_number.upper().strip()
-    for workspace in booking_info['asscocicateInfoList']:
-        if workspace.get('worspaceName', '').upper().strip() == normalized_seat:
-            return SeatAvailability(seat_number=workspace['worspaceName'], is_available=workspace.get('workspaceStatusId') == 1,
-                                    workspace_id=str(workspace.get('workspaceId', '')), status_name=workspace.get('statusName', ''))
-    return SeatAvailability(seat_number=seat_number, is_available=False, workspace_id="", status_name="Seat not found")
-
-def parse_dates_fallback(message: str, today_iso_date: str) -> List[str]:
+# --- Agent Tools ---
+@tool
+async def get_allowed_buildings() -> dict:
     """
-    Fallback date parser for common patterns when LLM fails
+    Retrieves a list of all buildings the associate is authorized to book a seat in.
+    This tool orchestrates multiple API calls to get the result.
     """
-    dates = []
-    today_date = datetime.strptime(today_iso_date, "%Y-%m-%d")
-    current_year = today_date.year
-    
-    message_lower = message.lower()
-    
-    date_range_pattern = r'(\d{1,2})(?:th|st|nd|rd)?\s+(\w+)\s*[-–—to]\s*(\d{1,2})(?:th|st|nd|rd)?\s+(\w+)'
-    range_match = re.search(date_range_pattern, message_lower)
-    
-    if range_match:
-        start_day, start_month, end_day, end_month = range_match.groups()
-        try:
-            start_date = parse_date_string(f"{start_day} {start_month} {current_year}")
-            end_date = parse_date_string(f"{end_day} {end_month} {current_year}")
-            
-            if start_date and end_date:
-                current_date = start_date
-                while current_date <= end_date:
-                    dates.append(current_date.strftime("%Y-%m-%d"))
-                    current_date += timedelta(days=1)
-                return dates
-        except:
-            pass
-    
-    single_month_range = r'(\d{1,2})(?:th|st|nd|rd)?\s*[-–—to]\s*(\d{1,2})(?:th|st|nd|rd)?\s+(\w+)'
-    single_match = re.search(single_month_range, message_lower)
-    
-    if single_match:
-        start_day, end_day, month = single_match.groups()
-        try:
-            start_date = parse_date_string(f"{start_day} {month} {current_year}")
-            end_date = parse_date_string(f"{end_day} {month} {current_year}")
-            
-            if start_date and end_date:
-                current_date = start_date
-                while current_date <= end_date:
-                    dates.append(current_date.strftime("%Y-%m-%d"))
-                    current_date += timedelta(days=1)
-                return dates
-        except:
-            pass
-    
-    if "today and tomorrow" in message_lower:
-        dates.append(today_iso_date)
-        dates.append((today_date + timedelta(days=1)).strftime("%Y-%m-%d"))
-    elif "tomorrow and day after" in message_lower:
-        dates.append((today_date + timedelta(days=1)).strftime("%Y-%m-%d"))
-        dates.append((today_date + timedelta(days=2)).strftime("%Y-%m-%d"))
-    elif "next" in message_lower and "day" in message_lower:
-        numbers = re.findall(r'\d+', message_lower)
-        if numbers:
-            num_days = int(numbers[0])
-            for i in range(num_days):
-                dates.append((today_date + timedelta(days=i)).strftime("%Y-%m-%d"))
-    elif "today" in message_lower and "tomorrow" not in message_lower:
-        dates.append(today_iso_date)
-    elif "tomorrow" in message_lower and "today" not in message_lower:
-        dates.append((today_date + timedelta(days=1)).strftime("%Y-%m-%d"))
-    
-    return dates
-
-def parse_date_string(date_str: str) -> Optional[datetime]:
-    from dateutil import parser
-    try:
-        return parser.parse(date_str)
-    except:
-        months = {
-            'january': 1, 'jan': 1, 'february': 2, 'feb': 2, 'march': 3, 'mar': 3,
-            'april': 4, 'apr': 4, 'may': 5, 'june': 6, 'jun': 6, 'july': 7, 'jul': 7,
-            'august': 8, 'aug': 8, 'september': 9, 'sep': 9, 'october': 10, 'oct': 10,
-            'november': 11, 'nov': 11, 'december': 12, 'dec': 12
-        }
-        
-        parts = date_str.lower().split()
-        if len(parts) >= 3:
-            try:
-                day_str = re.sub(r'(st|nd|rd|th)', '', parts[0])
-                day = int(day_str)
-                month_str = parts[1]
-                year = int(parts[2])
-                month = months.get(month_str)
-                if month:
-                    return datetime(year, month, day)
-            except (ValueError, IndexError):
-                pass
-        return None
-
-def format_booking_results_table(booking_results_list: List[DayBookingStatus], collected_info: Dict[str, Any]) -> str:
-    time_slot_display = collected_info.get('booking_time_slot', 'full_day').replace('_', ' ').title()
-    table_header = "| Date | Time Slot | Building | Floor | Seat Number | Status |\n"
-    table_separator = "|------|-----------|----------|-------|-------------|--------|\n"
-    table_rows = []
-
-    for result in booking_results_list:
-        date_formatted = result.date.strftime("%d.%b.%Y")
-        status_message = f"✅ Booked" if result.success else f"❌ {result.message}"
-        row = (f"| {date_formatted} | {time_slot_display} | {collected_info.get('building_no', 'N/A')} | "
-               f"{collected_info.get('floor', 'N/A')} | {collected_info.get('seat_number', 'N/A')} | {status_message} |")
-        table_rows.append(row)
-
-    confirmation_table = table_header + table_separator + "\n".join(table_rows)
-    user_details_parts = ["\n"]
-    if collected_info.get("employee_name"): user_details_parts.append(f"**Employee:** {collected_info['employee_name']}")
-    if collected_info.get("employee_email"): user_details_parts.append(f"({collected_info['employee_email']})")
-    return confirmation_table + " ".join(user_details_parts)
-
-async def process_multi_date_booking(employee_id: str, dates_list: List[str], collected_info: Dict[str, Any]):
-    # Convert ISO strings to datetime objects
-    dates_to_book_dt = [datetime.fromisoformat(d) for d in dates_list]
-
-    multi_day_results: List[DayBookingStatus] = []
+    print("Tool 'get_allowed_buildings' called.")
     access_token = await get_new_access_token()
     if not access_token:
-        for date_obj in dates_to_book_dt: multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="System error: Auth token failed."))
-        return {"success": False, "booking_results": multi_day_results, "confirmation_table": format_booking_results_table(multi_day_results, collected_info), "message": "System error: Could not get access token."}
+        return {"error": "Failed to get authentication token."}
 
-    if not collected_info.get("employee_name") or not collected_info.get("employee_email"):
-        await get_associate_info(access_token, employee_id)
+    employee_id = _current_employee_id.get()
+    if not employee_id:
+        return {"error": "Employee ID not found in context. Cannot retrieve buildings."}
 
-    associate_api_info = user_data_store[employee_id].get("associate_api_data")
-    if not associate_api_info:
-        associate_api_info = await get_associate_info(access_token, employee_id)
-        if associate_api_info:
-            user_data_store[employee_id]["associate_api_data"] = associate_api_info
-        else:
-            for date_obj in dates_to_book_dt: multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="System error: Failed to get associate info."))
-            return {"success": False, "booking_results": multi_day_results, "confirmation_table": format_booking_results_table(multi_day_results, collected_info), "message": "Failed to retrieve associate information."}
-    
-    unit_id = extract_unit_id(associate_api_info, collected_info["building_no"], collected_info["floor"])
-    if not unit_id:
-        for date_obj in dates_to_book_dt: multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="Invalid Building/Floor or unit ID not found."))
-        return {"success": False, "booking_results": multi_day_results, "confirmation_table": format_booking_results_table(multi_day_results, collected_info), "message": "Invalid Building/Floor or unit ID not found."}
+    associate_info = await get_associate_info(access_token, employee_id)
+    if not associate_info:
+        return {"error": f"Failed to get associate information for employee {employee_id}."}
 
-    seat_num_to_check = collected_info["seat_number"]
-
-    if seat_num_to_check and len(seat_num_to_check) > 2 and "-" not in seat_num_to_check:
-        formatted_seat_num = f"{seat_num_to_check[:2]}-{seat_num_to_check[2:]}"
-        print(f"Reformatted seat number from {seat_num_to_check} to {formatted_seat_num}")
-        seat_num_to_check = formatted_seat_num
-        collected_info["seat_number"] = seat_num_to_check
-
-    time_slot = collected_info.get("booking_time_slot", "full_day")
-
-    for date_obj in dates_to_book_dt:
-        floor_booking_data = await get_floor_booking_info(access_token, unit_id, date_obj)
-        if not floor_booking_data:
-            multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="Failed to get availability for this date."))
-            continue
-        seat_availability = check_seat_availability(floor_booking_data, seat_num_to_check)
-        if not seat_availability or not seat_availability.is_available:
-            multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message=f"Seat not available ({seat_availability.status_name if seat_availability else 'Not found'})."))
-            continue
-        if seat_availability.workspace_id:
-            booking_api_result = await book_seat(access_token, employee_id, seat_availability.workspace_id, date_obj, time_slot)
-            multi_day_results.append(DayBookingStatus(date=date_obj, success=booking_api_result.success, message=booking_api_result.message, details=booking_api_result.booking_details, workspace_id=seat_availability.workspace_id))
-        else:
-            multi_day_results.append(DayBookingStatus(date=date_obj, success=False, message="Workspace ID not found for booking."))
-    overall_success = any(res.success for res in multi_day_results)
-    return {"success": overall_success, "booking_results": multi_day_results, "confirmation_table": format_booking_results_table(multi_day_results, collected_info)}
-
-def get_status_name(status_code: int) -> str:
-    status_map = {
-        4: "Booked",  
-        1: "Cancelled", 
-    }
-    return status_map.get(status_code, f"Unknown (Status {status_code})")
-
-def filter_and_sort_cancellable_bookings(booking_history: List[BookingHistoryItem]) -> List[BookingHistoryItem]:
-    cancellable: List[BookingHistoryItem] = []
-    today = datetime.now().date()
-    for booking in booking_history:
-        try:
-            from_date_dt = datetime.fromisoformat(booking.fromDate)
-            if booking.status == 4 and from_date_dt.date() >= today:
-                cancellable.append(booking)
-        except Exception as e:
-            print(f"Skipping booking item {booking.allocationID} due to parsing/filter error: {e}")
-            continue
-    cancellable.sort(key=lambda b: datetime.fromisoformat(b.fromDate))
-    return cancellable
-
-def generate_initial_greeting(employee_id: str) -> str:
-    user_name = user_data_store.get(employee_id, {}).get("collected_info", {}).get("employee_name")
-    greeting = f"Hello{(' ' + user_name) if user_name else ''}! "
-    greeting += "I can help you book seat (I'll need the days,booking time slot, building, floor, and seat number), cancel an existing booking (I'll need the seat number and specific date), or view your booking history. Please specify what you'd like to do?"
-    return greeting
-
-
-def clear_user_flow_state(employee_id: str, intent_to_clear: Optional[str] = None):
-    if employee_id not in user_data_store:
-        return
-    
-    fields_to_pop = [
-        "intent", "cancellation_step", "selected_allocation_id_for_cancel",
-        "cancellable_bookings_cache", "awaiting_booking_confirmation",
-        "booking_dates_iso", "offered_tomorrow", "offered_next_week",
-        "specific_booking_details_for_cancel",
-        "llm_parsed_dates_iso_list", "llm_parsed_cancel_date_iso", "selected_allocation_id"
-    ]
-    
-    booking_related_fields = LOCATION_FIELDS + BOOKING_INFO_FIELDS
-    cancel_related_fields = CANCEL_INFO_FIELDS
-    view_history_related_fields = VIEW_HISTORY_FIELDS
-
-    if intent_to_clear == "book_seat":
-        fields_to_pop.extend(booking_related_fields)
-    elif intent_to_clear == "cancel_seat":
-        fields_to_pop.extend(cancel_related_fields)
-    elif intent_to_clear == "view_booking_history":
-        fields_to_pop.extend(view_history_related_fields)
-    else: # Full reset
-        fields_to_pop.extend(booking_related_fields)
-        fields_to_pop.extend(cancel_related_fields)
-        fields_to_pop.extend(view_history_related_fields)
-
-    for field in set(fields_to_pop):
-        user_data_store[employee_id]["collected_info"].pop(field, None)
-
-async def get_llm_response_for_booking(message: str, conversation_history: List[Dict[str, str]], collected_info: Dict[str, Any]):
-    system_prompt_parts = ["You are a helpful assistant for Bosch seat booking."]
-    missing_fields_desc = []
-    
-    required_booking_fields_map = {
-        "booking_days_description": "the day(s) for the booking (e.g., 'today', 'next Monday')",
-        "booking_time_slot": "the time slot (e.g., 'full day', 'first half', or 'second half')",
-        "building_no": "the building number (e.g., '903')",
-        "floor": "the floor (e.g., '1st floor')",
-        "seat_number": "the seat number (e.g., 'L1-001')"
-    }
-    
-    for field_key, field_desc in required_booking_fields_map.items():
-        if field_key not in collected_info or not collected_info[field_key]:
-            missing_fields_desc.append(field_desc)
-    
-    if missing_fields_desc:
-        system_prompt_parts.append(f"Ask the user for the first missing detail needed for a booking, which is: {missing_fields_desc[0]}.")
-    else:
-        system_prompt_parts.append("All required information for booking has been collected. Acknowledge this briefly and state that a summary will be shown.")
-    
-    system_prompt_parts.extend([
-        "Your goal is to collect information for seat booking: booking days, time slot, building number, floor, and seat number.",
-        "Ask only one question at a time. Be friendly but efficient.",
-        "Do NOT ask for employee name or email; this is handled automatically.",
-        "Do NOT ask for the booking time in hours, but ask for the slot: 'full day', 'first half', or 'second half'.",
-        "Do NOT ask for confirmation to book. The system will show a summary for confirmation.",
-        "Do NOT use phrases like 'please hold on', 'wait a moment', or similar. Respond directly.",
-        "If you do not understand the user's input, ask them to clarify or rephrase."
-    ])
-    system_content = "\n".join(system_prompt_parts)
-    messages = [SystemMessage(content=system_content)]
-    for msg in conversation_history: messages.append(HumanMessage(content=msg["content"]) if msg["role"] == "user" else AIMessage(content=msg["content"]))
-    messages.append(HumanMessage(content=message))
-    try:
-        # MODIFICATION: Use async invoke
-        response = await llm.ainvoke(messages)    
-        return response.content
-    except Exception as e:
-        print(f"LLM error in get_llm_response_for_booking: {e}")
-        # MODIFICATION: Provide a fallback response instead of raising an exception
-        return "I'm having some trouble right now. Can you please repeat that?"
-
-# MODIFICATION: New function to handle general/off-topic queries dynamically
-async def get_llm_general_response(message: str, user_name: Optional[str]) -> str:
-    """
-    Generates a conversational, helpful response for general or out-of-scope queries using an LLM.
-    """
-    system_prompt = f"""
-    You are a friendly and helpful AI assistant for the Bosch seat booking system.
-    Your core capabilities are strictly limited to:
-    1. Booking a work seat.
-    2. Cancelling a seat booking.
-    3. Viewing booking history.
-
-    The user, {user_name or 'there'}, has said something that seems to be a general question, a greeting, or is outside your scope.
-    Your task is to:
-    - Acknowledge their message in a friendly way.
-    - Gently clarify that you can't help with their specific request if it's off-topic.
-    - Steer the conversation back to your main functions.
-    - Ask them what they would like to do (book, cancel, or view history).
-
-    Example 1:
-    User: "what's the weather like?"
-    You: "I can't check the weather for you, but I'd be happy to help you book a seat, cancel a booking, or view your booking history. What can I do for you today?"
-
-    Example 2:
-    User: "thanks"
-    You: "You're welcome! Is there anything else I can help you with, like booking or cancelling a seat?"
-    
-    Example 3 (if the intent was unclear):
-    User: "second" (out of context)
-    You: "I'm sorry, I didn't quite understand that. To help you best, could you tell me if you'd like to book a seat, cancel a booking, or see your history?"
-
-    Keep your response concise and helpful.
-    """
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=message)
-    ]
-    try:
-        response = await llm.ainvoke(messages)
-        return response.content
-    except Exception as e:
-        print(f"LLM error in get_llm_general_response: {e}")
-        # Fallback static response
-        return "I'm sorry, I'm having a little trouble right now. I can help you book a seat, cancel a booking, or view your history. Please let me know how I can assist."
-
-
-def normalize_seat_number(seat_number: str) -> str:
-    return seat_number.replace("-", "").lower()
-
-def seats_match(seat1: str, seat2: str) -> bool:
-    return normalize_seat_number(seat1) == normalize_seat_number(seat2)
-
-def get_allowed_buildings(associate_info: Dict[str, Any]) -> List[str]:
-    if not associate_info or 'availableSeatList' not in associate_info:
-        return []
+    if 'availableSeatList' not in associate_info:
+        return {"error": "No available seat list found in associate information."}
 
     allowed_buildings = set()
-    print("associate_info", associate_info)
-    
     for floor_info in associate_info.get('availableSeatList', []):
         for key in floor_info.keys():
-            # Skip 'floor' and 'iscob' keys (case-insensitive)
-            if key.lower() in ['floor', 'iscob']:
-                continue    
-            
-            # Any other key is considered a building identifier
-            print("key", key)
-            allowed_buildings.add(key)
-    
-    return sorted(list(allowed_buildings))
+            # Any key that isn't 'floor' or 'iscob' is a building number
+            # print("line 491 key",key)
+            if key.lower() not in ['floor', 'iscob']:
+                allowed_buildings.add(key)
+    if not allowed_buildings:
+        return {"message": "No allowed buildings found for the associate."}
+    return {"allowed_buildings": sorted(list(allowed_buildings))}
 
-def get_allowed_locations(associate_info: Dict[str, Any]) -> Dict[str, str]:
+def get_allowed_locations_internal(associate_info: Dict[str, Any]) -> Dict[str, str]:
     if not associate_info:
         return {}
     
@@ -815,563 +642,680 @@ def get_allowed_locations(associate_info: Dict[str, Any]) -> Dict[str, str]:
     
     return location_info
 
-def validate_user_location(user_location: str, associate_info: Dict[str, Any]) -> bool:
-    if not user_location or not associate_info:
-        return False
-    
-    allowed_locations = get_allowed_locations(associate_info)
-    user_location_lower = user_location.lower().strip()
-    
-    return (
-        user_location_lower == allowed_locations.get('office_location_name', '') or
-        user_location_lower == allowed_locations.get('location_name', '') or
-        user_location.upper() == allowed_locations.get('office_location_code', '')
-    )
-
-async def extract_info_with_llm(message: str, current_info: Dict[str, Any], today_iso_date: str) -> Dict[str, Any]:
-    today_date = datetime.strptime(today_iso_date, "%Y-%m-%d")
-    current_weekday = today_date.strftime('%A')
-
-    llm_context_info = {
-        k: v for k, v in current_info.items()
-        if k not in ['cancellable_bookings_cache', 'booking_history_cache', 'associate_api_data', 'employee_name', 'employee_email']
-    }
-    system_prompt = f"""
-    You are an expert AI assistant for a seat booking system. Your task is to analyze a user's message and conversation context, then output a single, valid JSON object.
-
-    The JSON object must have two keys: "intent" and "parameters".
-    Today's date is: {today_iso_date} ({current_weekday}).
-
-    --- INTENTS ---
-    - 'book_seat': User wants to reserve a seat (even if details are incomplete).
-    - 'cancel_seat': User wants to cancel a booking (even if details are incomplete).
-    - 'view_booking_history': User wants to see their booking history.
-    - 'general_query': The request is completely unrelated to booking, canceling, or viewing history, or is just a greeting.
-
-    --- PARAMETERS (by Intent) ---
-    1. For 'book_seat':
-   - 'booking_days_description': The user's raw text for dates (e.g., 'next 3 days', 'July 15th', 'next monday').
-   - 'llm_parsed_dates_iso_list': A list of all dates in 'YYYY-MM-DD' format. Be very careful with date parsing:
-     * "next monday" = the upcoming Monday (if today is Monday, then next Monday is 7 days away)
-     * "tomorrow" = {(today_date + timedelta(days=1)).strftime('%Y-%m-%d')}
-     * "today" = {today_iso_date}
-     * "next week" = all weekdays (Mon-Fri) of next week starting from {(today_date + timedelta(days=7-today_date.weekday())).strftime('%Y-%m-%d')}
-     * "this week" = remaining weekdays of the current week (including today if applicable)
-     * Date ranges: "June 9-11" becomes ["{today_date.year}-06-09", "{today_date.year}-06-10", "{today_date.year}-06-11"]
-     * Always assume current year unless specified otherwise
-   - 'building_no': Building number (e.g., '903', from 'Kor903' extract '903').
-   - 'floor': Floor description (e.g., 'floor one','2nd floor', '1st floor'). Normalize to consistent format if possible (e.g. '1st floor').
-   - 'seat_number': Seat identifier, normalized to uppercase (e.g., 'L1A108', 'L1-001').
-   - 'Location': associte officeLocationCode(KOR),officeLocationName(Koramangala),locationName(Bengaluru) (e.g., 'Bengaluru','KOR','Koramangala','Hyderabad')
-   - 'booking_time_slot': Time slot for the booking. Must be one of: 'first_half', 'second_half', or 'full_day'.
-     * 'morning', 'first half', '8am-12pm' -> 'first_half'
-     * 'afternoon', 'second half', '1pm-8pm', 'second' -> 'second_half'
-     * 'full day', 'all day' -> 'full_day'
-     * If not mentioned, do not include this key.
-
-    2. For 'cancel_seat':
-   - 'cancel_seat_number': The seat to cancel, normalized to uppercase.
-   - 'cancel_date_description': The user's raw text for the cancellation date.
-   - 'llm_parsed_cancel_date_iso': The single cancellation date in 'YYYY-MM-DD' format.
-
-    3. For 'view_booking_history':
-   - No specific parameters needed
-
-    --- RULES ---
-    - IMPORTANT: Recognize the intent even if booking/cancellation details are incomplete.
-    - Only extract parameters from the user's LATEST message. Do not carry over parameters from the conversational state unless they are being re-confirmed.
-    - If a parameter is not mentioned in the latest message, do not include its key in the 'parameters' object.
-    - Use 'general_query' only for messages completely unrelated to seat booking operations.
-    - For building numbers: KOR903, Kor903, aud606, kormangala 903, hydrabad 888, cob432 → extract only the numeric part (903, 606,888,432).
-    - For floor information: "floor one" or "first floor" should be extracted as "1st floor". "ground floor" as "ground floor".
-    - Be very precise with date calculations. Consider the current day of the week when parsing relative dates.
-
-    --- EXAMPLES ---
-    User message: "book a seat for next monday morning in hydrabad 606 1st floor L1A108"
-    Your output:
-    {{
-  "intent": "book_seat",
-  "parameters": {{
-    "booking_days_description": "next monday morning",
-    "llm_parsed_dates_iso_list": ["{(today_date + timedelta(days=(7 - today_date.weekday()) % 7 or 7)).strftime('%Y-%m-%d')}"],
-    "building_no": "606",
-    "floor": "1st floor",
-    "seat_number": "L1A108",
-    "location":"hydrabad",
-    "booking_time_slot": "first_half"
-  }}
-    }}
-
-    User message: "book for tomorrow"
-    Your output:
-    {{
-  "intent": "book_seat",
-  "parameters": {{
-    "booking_days_description": "tomorrow",
-    "llm_parsed_dates_iso_list": ["{(today_date + timedelta(days=1)).strftime('%Y-%m-%d')}"]
-  }}
-    }}
+@tool
+async def get_allowed_locations_tool() -> dict:
     """
-    human_prompt_content = f"""
-    Analyze the following information and provide the JSON output as specified in your instructions.
-
-    - Current conversational state: {json.dumps(llm_context_info)}
-    - User's latest message: "{message}"
+    Retrieves the allowed office locations for the associate.
+    This tool orchestrates multiple API calls to get the result.
     """
+    print("Tool 'get_allowed_locations_tool' called.")
+    logger.info("Tool 'get_allowed_locations_tool' called.")
+    access_token = await get_new_access_token()
+    if not access_token:
+        logger.error("Failed to get authentication token.")
+        return {"error": "Failed to get authentication token."}
+    
+    employee_id = _current_employee_id.get()
+    if not employee_id:
+        logger.error("Employee ID not found in context. Cannot retrieve locations.")
+        return {"error": "Employee ID not found in context. Cannot retrieve locations."}
+
+    associate_info = await get_associate_info(access_token, employee_id)
+    if not associate_info:
+        logger.error(f"Failed to get associate information for employee {employee_id}.")
+        print(f"Failed to get associate information for employee {employee_id}.")
+        return {"error": f"Failed to get associate information for employee {employee_id}."}
+
+    # Use the provided function to extract location information
+    location_data = get_allowed_locations_internal(associate_info)
+    
+    if not any(location_data.values()):
+        logger.info(f"No location information found for employee {employee_id}.")
+        print(f"No location information found for employee {employee_id}.") 
+        return {"message": "No location information found for the associate."}
+        
+    return {"allowed_locations": location_data}
+
+class GetAvailableSeatsInput(BaseModel):
+    building: str = Field(description="The building number, for example, '903'.")
+    floor: str = Field(description="The floor number, for example, '1', 'Ground Floor', or 'five'.")
+    date: str = Field(description="The desired date for booking in YYYY-MM-DD format.")
+
+
+from datetime import datetime
+from collections import defaultdict
+import time
+
+import httpx
+async def get_Zonal_info_list(access_token):
+    print("Inside zonal api Fetching zonal booking information...")
+    """Gets zonal booking information."""
+    url = f"https://flexibook.boschassociatearena.com/api/flexi/GetListZonalBooking"
+    headers = {'Authorization': f'Bearer {access_token}'}
     try:
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=human_prompt_content)
-        ]
-        # MODIFICATION: Use async invoke
-        response_llm = await llm.ainvoke(messages)
-        extracted_json_str = response_llm.content.strip()
-        
-        match_json = re.search(r"\{.*\}", extracted_json_str, re.DOTALL)
-        if match_json:
-            extracted_json_str = match_json.group(0)
-
-        llm_output = json.loads(extracted_json_str)
-        print(f"LLM Raw Output: {llm_output}")
-
-        final_output = {}
-        final_output["intent"] = llm_output.get("intent", "general_query")
-        
-        if "parameters" in llm_output and isinstance(llm_output["parameters"], dict):
-            final_output.update(llm_output["parameters"])
-
-        print(f"LLM Extracted and Processed Info: {final_output}")
-        return final_output
-
-    # MODIFICATION: Instead of returning 'general_query' on any error, return a specific
-    # 'extraction_failed' intent. This prevents the conversation state from being reset.
+        print("Fetching zonal booking info...")
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            print("zonal api data",data)
+            return data
     except Exception as e:
-        print(f"Error in extract_info_with_llm: {e}")
-        return {"intent": "extraction_failed", "error": str(e)}
+        print(f"Error getting zonal info: {str(e)}")
+        return None
 
-# --- Token service functions (No changes needed) ---
-def validate_token(Authorization: str, client_id: str = "CD3054C5-6D98-47E9-BF73-43F26E8ED476") -> dict:
-    url = "https://dev.boschassociatearena.com/api/Token/ValidateToken"
-    headers = {
-        "Authorization": f"Bearer {Authorization}",
-        "clientID": client_id
+def preprocess_zonals(zonal_list):
+    seat_to_zonals = defaultdict(list)
+    print("Processing zonals...",zonal_list)
+    for z in zonal_list:
+        print("Processing zonal:", z)
+        try:
+            from_date = datetime.fromisoformat(z["blockFromDate"])
+            print("from_date:", from_date)
+            to_date = datetime.fromisoformat(z["blockToDate"])
+            print("to_date:", to_date)
+        except:
+            continue
+        emp_list = set(e.strip() for e in z["listEmployeeNumber"].split(",") if e.strip())
+        print("emp_list:", emp_list)
+        seat_list = set(s.strip() for s in z["listOfSeat"].split(",") if s.strip())
+        print("seat_list:", seat_list)
+        for seat_id in seat_list:
+            seat_to_zonals[seat_id].append({
+                "emp_set": emp_list,
+                "from_date": from_date,
+                "to_date": to_date
+            })
+    return seat_to_zonals
+
+
+def get_filtered_workspace_list(book_date, current_employee_number, get_booking_for_web_list, zonal_list):
+    print("zonal list....................", zonal_list)
+    if isinstance(book_date, str):
+        book_date = datetime.strptime(book_date, "%Y-%m-%d")
+    seat_to_zonals = preprocess_zonals(zonal_list)
+    result = []
+    # print(":::::::::::::::::::get booking for web list:::::::::::::::",get_booking_for_web_list)
+    for seat in get_booking_for_web_list["asscocicateInfoList"]:
+        # print("seat in zonal",seat)
+        workspace_id = seat.get("workspaceId")
+        worspace_name = seat.get("worspaceName")
+        is_flexible = seat.get("isFlexible")
+        is_valid = seat.get("isValid")
+        work_space_status_id = seat.get("workspaceStatusId")
+        you_cannot_book_this_zonnal = False
+        # print("seat::::::::::::::::::::::",seat)
+        zonals = seat_to_zonals.get(workspace_id, [])
+        print("zonals::::::::::::::::::",zonals)
+        for z in zonals:
+            if z["from_date"] <= book_date <= z["to_date"]:
+                print(":::::::::::::::::::::inside the zonal")
+                if str(current_employee_number) not in z["emp_set"]:
+                    print(":::::::::::::::::::::you cannot book this zonal====TRUE")
+                    you_cannot_book_this_zonnal = True
+                    break
+        result.append({
+            "workspaceId": int(workspace_id),
+            "worspaceName": worspace_name,
+            "isFlexible": is_flexible,
+            "isValid": is_valid,
+            "youCannotBookThisZonnal": you_cannot_book_this_zonnal,# true when this seat belong to zonnal and you do not have permission to book.
+            "workspaceStatusId": work_space_status_id
+        })
+    return result
+
+
+@tool(args_schema=GetAvailableSeatsInput)
+async def get_available_seats(building: str, floor: str, date: str) -> dict:
+    """
+    Checks for available seats for a given building, floor, and date.
+    This tool orchestrates multiple API calls to get the result.
+    """
+    print(f"Tool 'get_available_seats' called with: building={building}, floor={floor}, date={date}")
+    try:
+        booking_date = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        print("Invalid date format provided. Expected YYYY-MM-DD.")
+        return {"error": "Invalid date format. Please use YYYY-MM-DD."}
+
+    access_token = await get_new_access_token()
+    if not access_token:
+        print("Failed to get authentication token.")
+        return {"error": "Failed to get authentication token."}
+
+    employee_id = _current_employee_id.get()
+    if not employee_id:
+        print("Employee ID not found in context. Cannot get available seats.")
+        return {"error": "Employee ID not found in context. Cannot get available seats."}
+
+    # Try to get associate info from cache first, then fetch if not found
+    associate_info = user_data_store.get(employee_id, {}).get("associate_api_data")
+    if not associate_info: 
+        associate_info = await get_associate_info(access_token, employee_id)
+    if not associate_info:
+        print(f"Failed to get associate information for employee {employee_id}.")
+        logger.error(f"Failed to get associate information for employee {employee_id}.")
+        return {"error": f"Failed to get associate information for employee {employee_id}."}
+
+    unit_id = extract_unit_id(associate_info, building, floor)
+    print(":::::::::::::::::::::::::::::::::::::unit_id:", unit_id)
+    if not unit_id:
+        available_floors = [f['floor'] for f in associate_info.get('availableSeatList', [])]
+        return {"error": f"Could not find a matching unit for building '{building}' and floor '{floor}'. Available floors are: {available_floors}"}
+    
+    booking_info = await get_floor_booking_info(access_token, unit_id, booking_date)
+    # print("line 722 get_floor_booking_info::::::::::::::::::",booking_info.json())
+    if not booking_info or "asscocicateInfoList" not in booking_info:
+        return {"error": "Could not retrieve booking information for the specified floor and date."}
+    
+    zonal_list = await get_Zonal_info_list(access_token)
+    print("line 808 zonal_list", zonal_list)
+    seats_with_zonal_info = get_filtered_workspace_list(date, employee_id, booking_info, zonal_list)
+    print("line 808 seats_with_zonal_info", seats_with_zonal_info)
+    available_seats = [
+    {"seat_no": seat['worspaceName'], "workspace_id": seat['workspaceId']}
+    for seat in seats_with_zonal_info
+    if (seat.get("workspaceStatusId") == 1 and seat.get("youCannotBookThisZonnal")==False and
+        seat.get('worspaceName') is not None and
+        str(seat.get('worspaceName')).strip() != "")
+    ]
+    
+    if available_seats:
+        top_6_seats = available_seats[:10]
+        print("line 813 top_6_seats", top_6_seats)
+    if not available_seats:
+        return {"message": "No available seats found for the specified criteria."}
+    return {"available_seats": top_6_seats}
+
+# --- Helper function to process a single date ---
+async def _book_single_day(date_obj: datetime, unit_id: str, seat_no: str, timeslot: str, access_token: str) -> DayBookingStatus:
+    """Helper coroutine to check and book one day."""
+    employee_id = _current_employee_id.get() # Context is available here
+
+    floor_booking_data = await get_floor_booking_info(access_token, unit_id, date_obj)
+    # print("line 599 floor_booking_data",floor_booking_data)
+    if not floor_booking_data:
+        return DayBookingStatus(date=date_obj, success=False, message="Failed to get availability for this date.")
+
+    seat_availability = check_seat_availability(floor_booking_data, seat_no)
+    print("line 602 seat availabilty",seat_availability)
+    if not seat_availability.is_available:
+        return DayBookingStatus(date=date_obj, success=False, message=f"Seat not available ({seat_availability.status_name}).")
+
+    booking_api_result = await book_seat(access_token, employee_id, seat_availability.workspace_id, date_obj, timeslot)
+    return DayBookingStatus(date=date_obj, success=booking_api_result.success, message=booking_api_result.message)
+
+class BookSeatMultiDateInput(BaseModel):
+    dates: List[str] = Field(description="A list of dates in YYYY-MM-DD format to book the seat for.")
+    building: str = Field(description="The building number, for example, '903'.")
+    floor: str = Field(description="The floor number, for example, '1' or 'Ground'.")
+    seat_no: str = Field(description="The specific seat number to book across all dates, e.g., 'L1-048'.")
+    timeslot: str = Field(description="The timeslot for all bookings. Must be 'full_day', 'first_half', or 'second_half'.")
+
+@tool(args_schema=BookSeatMultiDateInput)
+async def book_seat_for_multiple_dates(dates: List[str], building: str, floor: str, seat_no: str, timeslot: str) -> dict:
+    """
+    Attempts to book a specific seat across multiple dates concurrently.
+    Use this when the user knows the exact seat they want for several days.
+    """
+    print(f"--- TOOL: book_seat_for_multiple_dates for seat {seat_no} ---")
+    logger.info(f"Tool 'book_seat_for_multiple_dates' called for seat {seat_no} on dates: {dates}, building: {building}, floor: {floor}, timeslot: {timeslot}")
+    
+    try:
+        dates_to_book_dt = [datetime.fromisoformat(d) for d in dates]
+        logger.info(f"Parsed dates for booking: {dates_to_book_dt}")
+    except ValueError:
+        logger.error("Invalid date format in input. Expected YYYY-MM-DD.")
+        print("Invalid date format in input. Expected YYYY-MM-DD.") 
+        return {"error": "One or more dates are in an invalid format. Please use YYYY-MM-DD."}
+
+    access_token = await get_new_access_token() # This will be cached
+    if not access_token:
+        logger.error("Failed to get authentication token.")
+        return {"error": "System error: Could not get authentication token."}
+
+    employee_id = _current_employee_id.get()
+    if not employee_id:
+        logger.error("Employee ID not found in context.")
+        return {"error": "Employee ID not found in context."}
+
+    # This call is also cached
+    associate_api_info = await get_associate_info(access_token, employee_id)
+    if not associate_api_info:
+        logger.error(f"Failed to get associate information for employee {employee_id}.")
+        return {"error": "System error: Failed to get associate information."}
+
+    unit_id = extract_unit_id(associate_api_info, building, floor)
+    print("unit_id",unit_id)
+    if not unit_id:
+        logger.error(f"Could not find a matching unit for building '{building}' and floor '{floor}'.")
+        return {"error": f"Could not find a matching unit for building '{building}' and floor '{floor}'."}
+    
+    # Create concurrent tasks
+    booking_tasks = [
+        _book_single_day(date_obj, unit_id, seat_no, timeslot, access_token)
+        for date_obj in dates_to_book_dt
+    ]
+    
+    # Run all tasks in parallel
+    multi_day_results = await asyncio.gather(*booking_tasks)
+    print("multi booking day results")
+
+    summary_table = format_booking_results_table(multi_day_results)
+    overall_success = any(res.success for res in multi_day_results)
+    logger.info(f"Multi-day booking process completed for seat {seat_no}. Overall success: {overall_success}")
+    return {
+        "success": overall_success,
+        "summary": f"Completed multi-day booking process for seat {seat_no}.",
+        "results_table": summary_table
     }
-    try:
-        response = requests.get(url, headers=headers, verify=False)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        return {
-            "IsSuccess": False,
-            "Message": "Request failed",
-            "ErrorMessage": str(e),
-            "ResponseData": []
-        }
 
-def decrypt_text(text_to_decrypt: str, client_id: str = "CD3054C5-6D98-47E9-BF73-43F26E8ED476") -> str:
-    url = "https://dev.boschassociatearena.com/api/Token/DecryptClientData"
-    params = {"TextToDecrypt": text_to_decrypt}
-    headers = {"clientID": client_id}
-    try:
-        response = requests.get(url, params=params, headers=headers, verify=False)
-        response.raise_for_status()
-        return response.text
-    except requests.exceptions.RequestException as e:
-        return f"Request failed: {str(e)}"
+# --- Cancellation and History Tools ---
 
-def parse_user_data(decrypted_data: str) -> dict:
-    try:
-        parts = decrypted_data.split(',')
-        if len(parts) >= 3:
-            return {
-                "employee_id": parts[0].strip(),
-                "employee_name": parts[1].strip(),
-                "employee_code": parts[2].strip()
-            }
-        else:
-            raise ValueError("Invalid user data format")
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to parse user data: {str(e)}"
+class ViewBookingHistoryInput(BaseModel):
+    limit: int = Field(5, description="The number of recent bookings to display.")
+
+@tool(args_schema=ViewBookingHistoryInput)
+async def view_booking_history(limit: int = 5) -> dict:
+    """
+    Retrieves and displays the user's upcoming and recent booking history.
+    """
+    print(f"Tool 'view_booking_history' called with limit: {limit}")
+    access_token = await get_new_access_token()
+    if not access_token:
+        return {"error": "Failed to get authentication token."}
+    
+    employee_id = _current_employee_id.get()
+    if not employee_id:
+        return {"error": "Employee ID not found in context. Cannot view booking history."}
+
+    all_bookings = await get_booking_history(access_token, employee_id)
+    if not all_bookings:
+        return {"message": "You have no booking history."}
+
+    # Filter for upcoming bookings first
+    upcoming_bookings = [
+        b for b in all_bookings
+        if datetime.fromisoformat(b.fromDate).date() >= datetime.now().date() and b.status == 4
+    ]
+    # Sort by date
+    upcoming_bookings.sort(key=lambda b: b.fromDate)
+
+    if not upcoming_bookings:
+        return {"message": "You have no upcoming bookings."}
+
+    # Format for display
+    formatted_bookings = []
+    for booking in upcoming_bookings[:limit]:
+        booking_date = datetime.fromisoformat(booking.fromDate).strftime('%Y-%m-%d')
+        formatted_bookings.append(
+            f" - **Seat {booking.seat}** on **{booking_date}** (Building: {booking.building}, Floor: {booking.floor})"
         )
+    
+    return {"booking_history": "\n".join(formatted_bookings)}
 
-from fastapi import Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+class CancelBookingInput(BaseModel):
+    seat_number: str = Field(description="The seat number to cancel, e.g., 'L1-048'.")
+    date: str = Field(description="The date of the booking to cancel in YYYY-MM-DD format.")
+
+@tool(args_schema=CancelBookingInput)
+async def cancel_booking(seat_number: str, date: str) -> dict:
+    """
+    Cancels a booking for a specific seat on a specific date.
+    """
+    print(f"Tool 'cancel_booking' called for seat: {seat_number} on date: {date}")
+    access_token = await get_new_access_token()
+    if not access_token:
+        logger.error("Failed to get authentication token.")
+        return {"error": "Failed to get authentication token."}
+
+    try:
+        target_date_obj = datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        logger.error("Invalid date format provided for cancellation.")
+        return {"error": "Invalid date format. Please use YYYY-MM-DD."}
+    
+    employee_id = _current_employee_id.get()
+    if not employee_id:
+        logger.error("Employee ID not found in context. Cannot cancel booking.")
+        return {"error": "Employee ID not found in context. Cannot cancel booking."}
+
+    all_bookings = await get_booking_history(access_token, employee_id)
+    if not all_bookings:
+        logger.info("No bookings found for cancellation.")
+        return {"message": "No bookings found to cancel."}
+
+    found_booking = None
+    for booking in all_bookings:
+        try:
+            booking_date = datetime.fromisoformat(booking.fromDate).date()
+            # Check for both seat match and status (4 for active bookings)
+            if seats_match(booking.seat, seat_number) and booking_date == target_date_obj and booking.status == 4:
+                found_booking = booking
+                break
+        except ValueError:
+            continue
+    
+    if not found_booking:
+        logger.info(f"No active booking found for seat {seat_number} on {date}.")
+        return {"message": f"No active booking found for seat {seat_number} on {date}."}
+
+    # Proceed with cancellation
+    cancellation_result = await cancel_booking_api(access_token, found_booking.allocationID)
+    logger.info(f"Cancellation result for seat {seat_number} on {date}: {cancellation_result}")
+    return cancellation_result.dict()
+
+# --- Agent State and Graph Definition ---
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], operator.add]
+
+# --- Combined Tool List ---
+tools = [
+    get_available_seats,
+    book_seat_for_multiple_dates,
+    get_allowed_buildings,
+    get_allowed_locations_tool,
+    view_booking_history,
+    cancel_booking
+    ]
+tool_node = ToolNode(tools)
+
+# Initialize Azure OpenAI LLM
+llm = AzureChatOpenAI(
+                    azure_deployment="GPT4",
+                    api_key="af6c5f2c43294f1e9287a50d652c637e", 
+                    model="gpt-4o",
+                    api_version="2024-12-01-preview",
+                    azure_endpoint="https://ctmatchinggpt.openai.azure.com/", 
+                    temperature=0)
+
+llm_with_tools = llm.bind_tools(tools)
+
+# Agent node: invokes the LLM with the current conversation messages
+def agent_node(state: AgentState):
+    print("---AGENT NODE---")
+    messages_to_send = state["messages"]
+    print("::::::::::::::::::::::::::::::::::::::::::Aget Node::::::::::::::::::::::::::::::::::")
+    print("messages_to_send::::::::::",messages_to_send)
+    try:
+        print(f"Invoking LLM with {len(messages_to_send)} messages.")
+        response = llm_with_tools.invoke(messages_to_send)
+        # print(":::::::::::::::::::::::llm response::::::::::::::::::::::::::::::::::::",response)
+        return {"messages": [response]}
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            print("Rate limit hit. Tenacity will retry...")
+            raise
+        else:
+            return {"messages": [AIMessage(content=f"An unexpected API error occurred: {e}")]}
+
+# Conditional edge: decides whether to continue with tool call or end
+def should_continue(state: AgentState) -> str:
+    # If the last message from the agent has tool calls, route to tools
+    return "call_tool" if state["messages"][-1].tool_calls else END
+
+# Define the LangGraph workflow
+workflow = StateGraph(AgentState)
+workflow.add_node("agent", agent_node)
+workflow.add_node("tools", tool_node)
+workflow.set_entry_point("agent")
+workflow.add_conditional_edges("agent", should_continue, {"call_tool": "tools", END: END})
+workflow.add_edge("tools", "agent")
+
+# Compile the LangGraph application
+app_graph = workflow.compile() 
+
+# --- FastAPI App Initialization ---
+app = FastAPI(title="LangGraph Arena Bosch Chatbot API", version="live5")
+
+# Configure CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Adjust this in production for security
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 security = HTTPBearer()
 
+def dict_to_readable_string(location_dict: Dict[str, str]) -> str:
+    """Helper function to convert location dictionary to readable string format."""
+    return ", ".join([f"{code}: {name}" for code, name in location_dict.items()])
+    
+# System prompt for the chatbot
+known_locations = {
+    "ADU": "Adugodi", "KOR": "Koramangala", "COB-GTP": "COB - Global Technology Park",
+    "KT1": "Coimbatore SEZ", "KT2": "Coimbatore SEZIL", "EC1": "Electronic City",
+    "HMVT": "HM-Vibha Tower", "PBP": "Pune",
+    "EC": "Electronic City", "Hyd": "Hyderabad", "COB": "Coimbatore"
+}
+
+known_buildings = [
+"601",
+"602",
+"603",
+"605",
+"BlockA",
+"BlockB",
+"BlockC",
+"102",
+"101",
+"106",
+"EC 360 BP",
+"HM-Vibha-Tower",
+"Hyderabad3",
+"Tower A",
+"Tower B & C",
+"ta",
+"tb","tc","901","903","905"]
+
+import pytz
+
+def get_system_prompt() -> HumanMessage:
+    """
+    Generates the system prompt with the current date for the India time zone.
+    This ensures the date is fresh for every new conversation.
+    """
+    india_tz = pytz.timezone('Asia/Kolkata')
+    current_india_time = datetime.now(india_tz)
+    print("current_india_time:", current_india_time)
+    
+    prompt_content = f"""
+    You are a helpful assistant designed to book, cancel, and view seat bookings.
+    Today's date is {current_india_time.strftime('%Y-%m-%d')}.
+    Your primary goal is to guide the user through their request by following a clear, step-by-step process.
+
+    ### Greet the user and determine their intent: booking, canceling, or viewing history. ###
+
+    ---
+    ### --- Booking a Seat --- ###
+
+    **Step 1: Identify and Validate Building**
+    - A. Ask the user to specify a building.
+    - B. Use the `get_allowed_buildings` tool for the permissible Buildings.
+    - C. Compare the user's input against the list of allowed buildings. For your reference, example Buildings: {', '.join(known_buildings)}.
+    - D. Attempt to find a match, even if the user's input is a synonym or a close variation.
+    - E. If a match is found: Proceed.
+    - F. If no match is found: Show the list of available buildings.
+
+    **Step 2: Identify Booking Type**
+    - Ask the user whether they want to book a **workspace** or a **cabin**.
+    - Based on their selection, follow the appropriate path.
+
+    ---
+    #### Workspace Booking Flow ####
+
+    **Step 3: Ask for floor, date(s), and timeslot (first half, second half, full day).**
+
+    **Follow one of the two paths:**
+    
+      #### Path 2.1: User knows the seat number ####
+      - Ask for the seat number.
+      - Format the seat number as **L<FloorNumber>-<SeatCode>**.
+        - Examples:
+            “736” on floor 1 → L1-736
+            “034” on floor 0 → L0-034
+            “a054” on floor 3 → L3-A054
+
+      #### Path 2.2: User doesn't know the seat number ####
+      - Use `get_available_seats` tool with building, floor, and date to get top 10 available seats.
+      - Show the list and ask the user to choose one.
+      - Book using `book_seat_for_multiple_dates` tool.
+
+    ---
+    #### Cabin Booking Flow ####
+
+    **Step 3: Ask for the desired cabin number and date/timeslot.**
+    - Do **not** format cabin numbers. Keep them as provided by the user (e.g., "568", "664").
+    - Use `book_seat_for_multiple_dates` to finalize the booking.
+
+    ---
+    **Step If user mentioned location: Identify and Validate Location (Only if the user mentioned one)**
+    - Use `get_allowed_locations_tool` to get allowed locations.
+    - Example location names: {dict_to_readable_string(known_locations)}.
+    - Attempt fuzzy matching with known names.
+    - Confirm the recognized location with the user.
+
+    ---
+    ### --- Canceling a Seat --- ###
+ 
+    **Step 1: Gather Information**
+    - Ask the user for the **seat number** and the **date** of the booking they wish to cancel.
+ 
+    **Step 2: Execute Cancellation**
+    - Use the cancel_booking tool with the provided seat number and date.
+ 
+    **Step 3: Report Result**
+    - Inform the user of the outcome of the cancellation attempt.
+
+    ---
+    ### --- Viewing Booking History --- ###
+
+    **Step 1: Acknowledge Request**
+    - Confirm user's request to see their bookings.
+
+    **Step 2: Retrieve History**
+    - Use `view_booking_history` tool.
+
+    **Step 3: Display History**
+    - Show a nicely formatted list of upcoming bookings.
+
+    ---
+    **Important Rules:**
+
+    - **Seat Number Interpretation:**
+      - If the user provides a seat number **without a prefix** (e.g., "736", "054", "568"), do **not** assume it's a workspace.
+      - Ask the user:  
+        > "Is this seat for a *workspace* or a *cabin*?"
+      - Based on the user's answer:
+        - **Workspace**: Format as `L<FloorNumber>-<SeatCode>`. You must have the floor number from the user (ask if missing).
+        - **Cabin**: Use the seat number as-is (no formatting, e.g., "568").
+      - If the user provides a seat number **with a prefix** (e.g., "L1-736", "L0-034") assume it as a workspace and do not ask user again.
+
+    - **Workspace Formatting Rules**:
+        - Examples:
+          - “736” on floor 1 → L1-736
+          - “034” on floor 0 → L0-034
+          - “a054” on floor 3 → L3-A054
+          - Accept flexible user inputs like “l0 b034”, “l12024”, “l3a054”, etc.
+
+    - **Cabin Formatting Rules**:
+        - Do **not** apply any formatting. Use directly:  
+          Examples: “568”, “664”, “723”
+
+    - **Always Confirm Booking Type** if the input is ambiguous.
+
+    - **Communication**: Be friendly, clear, and guide the user step-by-step. Do not show step numbers to the user.
+    """
+    return HumanMessage(content=prompt_content)
+
+
+# --- MODIFIED: /chat endpoint ---
 @app.post("/chat", response_model=ChatResponse)
 async def chat(
     request: ChatRequest = Body(...),
     credentials: HTTPAuthorizationCredentials = Depends(security),
     Session_id: Optional[str] = Header(None, alias="Session_id")
-):
-    message_text = request.EmployeeQueryMessage.strip()
+    ):
+    print("-----------------Received Chat Request------------------")
+    if not Session_id:
+        raise HTTPException(status_code=400, detail="A 'Session_id' header is required for the chat.")
     
+    message_text = request.EmployeeQueryMessage.strip()
+
     authorization = credentials.credentials
     if not authorization:
-        raise HTTPException(status_code=401, detail="Authorization is required")
+        raise HTTPException(status_code=401, detail="Authorization is required.")
     
+    token_context_reset_token = None
     try:
-        # Step 1: Validate Authorization and get encrypted data
+        # (Your token validation and user info parsing logic remains the same)
         encrypted_data = validate_token(authorization)
-        # print(f"Encrypted data: {encrypted_data}")
-
         response_data = encrypted_data.get('ResponseData', [])
-        if response_data and isinstance(response_data, list):
-           newdata = response_data[0]
-        #    print(f"New data: {newdata}")
-        else:
-           print("ResponseData is missing or empty")
-           newdata = None
-        
-        # Step 2: Decrypt the client data
+        newdata = response_data[0] if response_data and isinstance(response_data, list) else None
         decrypted_data =  decrypt_text(newdata)
-        # print(f"Decrypted data: {newdata}")
-        
-        # Step 3: Parse user information
         user_info = parse_user_data(decrypted_data)
-        # print(f"User info: {user_info}")
-        
-        # Now you can use the user_info in your chat logic
-        # For example:
-        # employee_id = 35017285
         employee_id = user_info["employee_id"]
+
+        # Karunakaran ec360
+        # employee_id=35815608  
+
+          # atharwa pune
+        # employee_id = 35581584 
+      
+        # abhishek cob gtp
+        # employee_id = 35489300 
+     
+        # Aparajeeta hydrabad3
+        # employee_id = 31563433 
+
+        # shanmugam
+        # employee_id=30579552
         try:
-          employee_id = int(str(employee_id).strip().replace('"', '').replace("'", ''))
+          employee_id = str(int(str(employee_id).strip().replace('"', '').replace("'", '')))
+          await log_conversation_to_db(Session_id, message_text, 'user', employee_id=int(employee_id))
         except ValueError:
-           print(f"Invalid employee_id: {employee_id}")
+           print(f"Invalid employee_id from token: {employee_id}")
+           raise HTTPException(status_code=400, detail=f"Invalid employee_id format in token: {employee_id}")
         
-        employee_name = user_info["employee_name"]
-        employee_code = user_info["employee_code"]
+        token_context_reset_token = _current_employee_id.set(employee_id)
+        print(f"Employee ID set in context: {employee_id}")
+
+        # (Your conversation state management logic remains the same)
+        if Session_id not in conversation_state_store:
+            print(f"Initializing new session for Session_id: {Session_id}")
+            current_messages = [get_system_prompt()]
+        else:
+            print(f"Resuming session for Session_id: {Session_id}")
+            current_state = conversation_state_store[Session_id]
+            current_messages = current_state["messages"]
+
+        current_messages.append(HumanMessage(content=message_text))
+        initial_state = {"messages": current_messages}
+        result = await app_graph.ainvoke(initial_state)
+        conversation_state_store[Session_id] = result
+        for message in result['messages']:
+         message.pretty_print()
+         print("----------------------------------------------")
+        final_bot_response = result['messages'][-1].content
         
+        # --- NEW: Log the final AI response to the database ---
+        await log_conversation_to_db(Session_id, final_bot_response, 'ai', employee_id=int(employee_id))
     except HTTPException as e:
-        raise e # Re-raise existing HTTPExceptions
+        raise e 
     except Exception as e:
-        print(f"Token validation/decryption error: {e}")
-        raise HTTPException(status_code=401, detail="Failed to validate or decrypt token.")
-
-    today_iso_date_str = datetime.now().strftime("%Y-%m-%d")
-    
-    if employee_id not in user_data_store:
-        user_data_store[employee_id] = {"conversation_history": [], "collected_info": {}, "associate_api_data": None}
-        # Pre-fetch user name and associate data for a smoother experience
-        user_data_store[employee_id]["collected_info"]["employee_name"] = user_info.get("employee_name")
-        access_token = await get_new_access_token()
-        if access_token:
-            api_data = await get_associate_info(access_token, employee_id)
-            if api_data: user_data_store[employee_id]["associate_api_data"] = api_data
-
-    current_conversation_data = user_data_store[employee_id]
-    history = current_conversation_data["conversation_history"]
-    collected_info = current_conversation_data["collected_info"]
-    final_bot_response = ""
-    is_flow_complete_for_response = False
-
-    if message_text.lower() in RESET_COMMANDS:
-        clear_user_flow_state(employee_id, None) 
-        history.clear() 
-        final_bot_response = generate_initial_greeting(employee_id)
-        is_flow_complete_for_response = True 
-        history.append({"role": "user", "content": message_text})
-        history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(item=final_bot_response, status="True")
-
-    if message_text.lower() in GREETING_COMMANDS and not collected_info.get("intent"):
-        final_bot_response = generate_initial_greeting(employee_id)
-        history.append({"role": "user", "content": message_text})
-        history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(item=final_bot_response, status="True")
-
-    history.append({"role": "user", "content": message_text})
-    
-    previous_intent_before_llm = collected_info.get("intent")
-    llm_context = {k: v for k, v in collected_info.items() if k not in ['cancellable_bookings_cache', 'booking_history_cache', 'associate_api_data']}
-    
-    extracted_llm_data = await extract_info_with_llm(message_text, llm_context, today_iso_date_str)
-    
-    # --- MODIFICATION: Handle LLM Extraction Failure Gracefully ---
-    if extracted_llm_data.get("intent") == "extraction_failed":
-        final_bot_response = "I'm sorry, I had a little trouble understanding that. Could you please rephrase your request?"
-        # We do NOT clear state here. This allows the user to try again without losing progress.
-        history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(item=final_bot_response, status="True")
-
-    newly_extracted_intent = extracted_llm_data.get("intent")
-
-    if newly_extracted_intent and newly_extracted_intent != previous_intent_before_llm:
-        print(f"Intent changed from '{previous_intent_before_llm}' to '{newly_extracted_intent}'. Clearing state for '{previous_intent_before_llm}'.")
-        clear_user_flow_state(employee_id, previous_intent_before_llm)
-    
-    collected_info.update(extracted_llm_data)
-    current_intent = collected_info.get("intent") 
-
-    user_confirms = any(w in message_text.lower() for w in ["yes", "yep", "yeah", "confirm", "proceed", "ok", "sure", "do it"])
-    user_declines = any(w in message_text.lower() for w in ["no", "nope", "cancel", "stop", "don't", "do not", "never mind"])
-
-    # --- Confirmation Step Logic (No changes needed) ---
-    if collected_info.get("cancellation_step") == "awaiting_confirmation" and current_intent == "cancel_seat":
-        if user_confirms:
-            allocation_id = collected_info.get("selected_allocation_id")
-            access_token = await get_new_access_token() 
-            if not access_token:
-                final_bot_response = "Sorry, I couldn't get authorization. Please try again later."
-            elif allocation_id:
-                cancel_result = await cancel_booking_api(access_token, allocation_id)
-                if cancel_result.success:
-                    final_bot_response = "Your booking has been successfully cancelled."
-                else:
-                    final_bot_response = f"Sorry, I was unable to cancel the booking. Reason: {cancel_result.message}"
-            else:
-                final_bot_response = "Error: No booking was selected for cancellation."
-            is_flow_complete_for_response = True
-            clear_user_flow_state(employee_id, "cancel_seat")
-        elif user_declines:
-            final_bot_response = "Okay, the booking will not be cancelled. Anything else?"
-            is_flow_complete_for_response = True
-            clear_user_flow_state(employee_id, "cancel_seat")
-        else: 
-            final_bot_response = "I didn't quite understand. Please confirm with 'yes' or 'no' to cancel this booking."
-        
-        history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(item=final_bot_response, status="True")
-
-    elif collected_info.get("awaiting_booking_confirmation") and current_intent == "book_seat":
-        if user_confirms:
-            dates_to_book_iso = collected_info.get("llm_parsed_dates_iso_list", [])
-            today = datetime.now().date()
-            valid_dates_iso, ignored_dates_count = [], 0
-
-            for date_str in dates_to_book_iso:
-                try:
-                    if datetime.fromisoformat(date_str.split('T')[0]).date() >= today:
-                        valid_dates_iso.append(date_str)
-                    else:
-                        ignored_dates_count += 1
-                except (ValueError, TypeError):
-                    ignored_dates_count += 1
-            
-            warning_message = ""
-            if ignored_dates_count > 0:
-                plural_s = "s" if ignored_dates_count > 1 else ""
-                warning_message = f"Please note: I cannot book seats for past dates. {ignored_dates_count} requested date{plural_s} were ignored.\n\n"
-
-            if valid_dates_iso:
-                booking_process_result = await process_multi_date_booking(employee_id, valid_dates_iso, collected_info)
-                if booking_process_result["success"]: 
-                    final_bot_response = warning_message + f"Your booking request for the valid dates has been processed.\n\n{booking_process_result['confirmation_table']}"
-                else:
-                    final_bot_response = warning_message + f"Your booking request for the valid dates was processed, but encountered issues:\n\n{booking_process_result['confirmation_table']}"
-            else:
-                final_bot_response = warning_message + "There were no valid future dates to book. Please try the booking process again with a valid date (today or later)."
-            
-            is_flow_complete_for_response = True
-            clear_user_flow_state(employee_id, "book_seat")
-
-        elif user_declines:
-            final_bot_response = "Okay, I will not proceed with the booking. Is there anything else?"
-            is_flow_complete_for_response = True
-            clear_user_flow_state(employee_id, "book_seat")
-        else: 
-            final_bot_response = "I'm sorry, I didn't catch that. Do you want to proceed with the booking? (yes/no)"
-
-        history.append({"role": "assistant", "content": final_bot_response})
-        return ChatResponse(item=final_bot_response, status="True")
-    
-    # --- Main Intent Processing (cancel and view history logic remains the same) ---
-    if current_intent == "cancel_seat":
-        # ... (no changes to this block)
-        access_token = await get_new_access_token()
-        if not access_token:
-            final_bot_response = "Sorry, system error getting authorization. Please try again."
-        else:
-            seat_number = collected_info.get("cancel_seat_number")
-            parsed_cancel_date_iso = collected_info.get("llm_parsed_cancel_date_iso")
-            
-            if not seat_number:
-                final_bot_response = "To cancel a booking, which seat number is it?"
-            elif not parsed_cancel_date_iso:
-                final_bot_response = f"And for which date do you want to cancel seat {seat_number}?"
-            else:
-                try:
-                    target_date_obj = datetime.strptime(parsed_cancel_date_iso, "%Y-%m-%d").date()
-                    all_bookings = await get_booking_history(access_token, employee_id)
-                    found_booking = None
-                    for booking in all_bookings:
-                        try:
-                            booking_date = datetime.fromisoformat(booking.fromDate).date()
-                            if (seats_match(booking.seat, seat_number) and booking_date == target_date_obj and booking.status == 4 and booking_date >= datetime.now().date()):
-                                found_booking = booking
-                                break
-                        except ValueError: continue 
-                    
-                    if found_booking:
-                        final_bot_response = (f"I found a booking for seat {found_booking.seat} on "
-                                            f"{target_date_obj.strftime('%B %d, %Y')} (Building: {found_booking.building}, Floor: {found_booking.floor}). "
-                                            f"Are you sure you want to cancel it? (yes/no)")
-                        collected_info["selected_allocation_id"] = found_booking.allocationID
-                        collected_info["cancellation_step"] = "awaiting_confirmation"
-                    else:
-                        final_bot_response = (f"I couldn't find an active, cancellable booking for seat {seat_number} on "
-                                            f"{target_date_obj.strftime('%B %d, %Y')}. "
-                                            f"Please double-check the details.")
-                        clear_user_flow_state(employee_id, "cancel_seat")
-                except ValueError:
-                    final_bot_response = "The date provided seems invalid. Please provide a clear date like 'tomorrow' or 'July 15th'."
-                    collected_info.pop("llm_parsed_cancel_date_iso", None)
-                    collected_info.pop("cancel_date_description", None)
-
-    elif current_intent == "view_booking_history":
-        # ... (no changes to this block)
-        access_token = await get_new_access_token()
-        if not access_token:
-            final_bot_response = "Sorry, system error getting authorization. Please try again."
-        else:
-            booking_hist_items = await get_booking_history(access_token, employee_id)
-            if not booking_hist_items:
-                final_bot_response = "You have no booking history."
-            else:
-                booking_hist_items.sort(key=lambda item: datetime.fromisoformat(item.time), reverse=True)
-                history_count_to_show = 5
-                
-                history_to_show = booking_hist_items[:history_count_to_show]
-                response_parts = [f"Here are your {len(history_to_show)} most recent bookings:\n"]
-                for item in history_to_show:
-                    dt_obj = datetime.fromisoformat(item.fromDate)
-                    status_name = get_status_name(item.status)
-                    response_parts.append(
-                        f"- Seat: {item.seat}, For: {dt_obj.strftime('%d %b %Y')}, "
-                        f"Building: {item.building}, Floor: {item.floor}, Status: {status_name}"
-                    )
-                final_bot_response = "\n".join(response_parts)
-        is_flow_complete_for_response = True
-        clear_user_flow_state(employee_id, "view_booking_history")
-    
-    elif current_intent == "book_seat":
-        # ... (no changes to this block, the logic is sound)
-        user_provided_building = collected_info.get("building_no")
-        if user_provided_building:
-            associate_api_info = current_conversation_data.get("associate_api_data")
-            print("associate_api_info:--",associate_api_info)
-            if not associate_api_info:
-                access_token = await get_new_access_token()
-                if access_token:
-                    api_data = await get_associate_info(access_token, employee_id)
-                    print("api_data:",api_data)
-                    if api_data:
-                        current_conversation_data["associate_api_data"] = api_data
-                        associate_api_info = api_data
-            
-            if not associate_api_info:
-                final_bot_response = "I'm having trouble accessing your profile to validate the building. Please try again later."
-                clear_user_flow_state(employee_id, "book_seat")
-                history.append({"role": "assistant", "content": final_bot_response})
-                return ChatResponse(item=final_bot_response, status="True")
-
-            allowed_buildings = get_allowed_buildings(associate_api_info)
-            print("allowed_buildings:",allowed_buildings)
-            if not allowed_buildings:
-                final_bot_response = "It seems there are no buildings assigned to your profile. Please contact support."
-                clear_user_flow_state(employee_id, "book_seat")
-                history.append({"role": "assistant", "content": final_bot_response})
-                return ChatResponse(item=final_bot_response, status="True")
-            
-            if user_provided_building not in allowed_buildings:
-                allowed_buildings_str = ", ".join(allowed_buildings)
-                final_bot_response = (f"I'm sorry, but you are not authorized to book in Building {user_provided_building}. "
-                                      f"Your authorized buildings are: {allowed_buildings_str}. Please provide a valid building number.")
-                collected_info.pop("building_no", None)
-                history.append({"role": "assistant", "content": final_bot_response})
-                return ChatResponse(item=final_bot_response, status="True")
-        
-        user_provided_location = collected_info.get("location") 
-        if user_provided_location:
-          associate_api_info = current_conversation_data.get("associate_api_data")
-          if not associate_api_info:
-              access_token = await get_new_access_token()
-              if access_token:
-                  api_data = await get_associate_info(access_token, employee_id)
-                  if api_data:
-                      current_conversation_data["associate_api_data"] = api_data
-                      associate_api_info = api_data
-        
-          if not associate_api_info:
-              final_bot_response = "I'm having trouble accessing your profile to validate the location. Please try again later."
-              clear_user_flow_state(employee_id, "book_seat")
-              history.append({"role": "assistant", "content": final_bot_response})
-              return ChatResponse(item=final_bot_response, status="True")
-
-          if not validate_user_location(user_provided_location, associate_api_info):
-              allowed_locations = get_allowed_locations(associate_api_info)
-              location_options = []
-            
-              if allowed_locations.get('office_location_name'):
-                  location_options.append(allowed_locations['office_location_name'].title())
-              if allowed_locations.get('location_name'):
-                  location_options.append(allowed_locations['location_name'].title())
-              if allowed_locations.get('office_location_code'):
-                  location_options.append(allowed_locations['office_location_code'])
-            
-              allowed_locations_str = ", ".join(location_options)
-              final_bot_response = (f"I'm sorry, but you are not authorized to book in '{user_provided_location}'. "
-                                  f"Your authorized location is: {allowed_locations_str}. Please provide a valid location.")
-              collected_info.pop("location", None)
-              history.append({"role": "assistant", "content": final_bot_response})
-              return ChatResponse(item=final_bot_response, status="True")
-
-        all_location_fields_collected = all(collected_info.get(f) for f in LOCATION_FIELDS)
-        all_booking_info_collected = all(collected_info.get(f) for f in BOOKING_INFO_FIELDS)
-        
-        if all_location_fields_collected and all_booking_info_collected:
-            parsed_dates = []
-            if "llm_parsed_dates_iso_list" in collected_info:
-                parsed_dates = [datetime.fromisoformat(d) for d in collected_info["llm_parsed_dates_iso_list"]]
-            if not parsed_dates:
-                parsed_dates = parse_booking_days(collected_info.get("booking_days_description", ""))
-            
-            current_time_for_rules = datetime.now()
-            valid_dates_for_preview = []
-            for date_obj in parsed_dates:
-                if date_obj.date() >= current_time_for_rules.date():
-                    valid_dates_for_preview.append(date_obj)
-            
-            if not valid_dates_for_preview:
-                 final_bot_response = "The date(s) you requested are in the past. Please provide a valid date (today or in the future)."
-                 clear_user_flow_state(employee_id, "book_seat")
-                 is_flow_complete_for_response = True
-            else:
-                collected_info["llm_parsed_dates_iso_list"] = [d.isoformat() for d in valid_dates_for_preview]
-                collected_info["awaiting_booking_confirmation"] = True
-                time_slot_display = collected_info.get('booking_time_slot', 'full_day').replace('_', ' ').title()
-                preview_table = "| Date | Time Slot | Building | Floor | Seat Number |\n|------|-----------|----------|-------|-------------|\n"
-                for date_obj in valid_dates_for_preview:
-                    preview_table += f"| {date_obj.strftime('%d.%b.%Y')} | {time_slot_display} | {collected_info['building_no']} | {collected_info['floor']} | {collected_info['seat_number']} |\n"
-                
-                final_bot_response = f"Here is a summary of your request:\n\n{preview_table}\n\n**Do you want to proceed with this booking?** (yes/no)"
-                is_flow_complete_for_response = False
-        else:
-            final_bot_response = await get_llm_response_for_booking(message_text, history, collected_info)
-            is_flow_complete_for_response = False
-
-    # MODIFICATION: Use the new dynamic general response function
-    elif current_intent == "general_query" or not current_intent :
-        user_name = collected_info.get("employee_name")
-        final_bot_response = await get_llm_general_response(message_text, user_name)
-        is_flow_complete_for_response = True 
-        clear_user_flow_state(employee_id, "general_query")  
-    
-    else: 
-        final_bot_response = "I'm not sure how to help with that. You can ask me to 'book a seat', 'cancel a booking', or 'view my history'."
-        is_flow_complete_for_response = True 
-
-    # --- Log Bot Response and Return ---
-    MAX_HISTORY_LEN = 20 
-    if len(history) > MAX_HISTORY_LEN:
-        user_data_store[employee_id]["conversation_history"] = history[-MAX_HISTORY_LEN:]
-
-    history.append({"role": "assistant", "content": final_bot_response})
+        error_message = f"Internal chatbot error: {str(e)}"
+        print(f"Unhandled error during chat processing: {e}")
+        # --- NEW: Log error messages as well for analysis ---
+        await log_conversation_to_db(Session_id, error_message, 'ai_error', employee_id=int(employee_id))
+        raise HTTPException(status_code=500, detail=error_message)
+    finally:
+        if token_context_reset_token:
+            _current_employee_id.reset(token_context_reset_token)
+            print(f"Employee ID context reset for {employee_id}.")
     return ChatResponse(item=final_bot_response, status="True")
 
 @app.get("/")
 async def root():
-    return {"message": f"Bosch seat booking Chatbot API is running version: uatfinal3"}
+    return {"message": f"LangGraph Arena Bosch Chatbot API: live5"}
