@@ -10,6 +10,15 @@ from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel
 import requests
 
+llm = AzureChatOpenAI(
+                    azure_deployment="GPTbgsw-openAIservice-Voiceseatbooking4",
+                    api_key="2u2cSvJIlkFgj6BKsabPTVeIS4zcFlCu49yk2JxzrmUkIDTycp9qJQQJ99BHACYeBjFXJ3w3AAABACOGoOsh", 
+                    model="gpt-4o",
+                    api_version="2024-12-01-preview",
+                    azure_endpoint="https://bgsw-openaiservice-voiceseatbooking-p-eus-001.openai.azure.com/openai/deployments/bgsw-openAIservice-Voiceseatbooking/chat/completions?api-version=2025-01-01-preview", 
+                    temperature=0)
+
+
 Dn4yI0dHukIc2ih6lDxHbQTUSGLLWxqprwrarERPEHQljn7d7yoxJQQJ99BFACYeBjFXJ3w3AAABACOGZwJO
 
 
