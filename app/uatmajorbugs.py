@@ -10,6 +10,80 @@ from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel
 import requests
 
+2/7/2025 Tasks.
+
+1. Sahil 
+- AI Assistance - 5 Days of booking / As new Policy
+- AI Service for altFurture.AI
+- UAT Bugs
+
+Ft.hitec 
+
+1. Worked on the the https ssl certifite for vm deployed version.
+2.Fix this in chatbot Status of all programs was not accurate – need to check
+3.fix this in chatbot No. of theme leads questions is not correct – need to check
+
+
+3/7/2025
+
+project1.
+Arena APP:
+
+5days booking UAT bugs
+1. Initial information to list down what and all has to be said by an associate to book the seat.
+2. Booking for 5 consecutive days is not possible — this limitation needs to be reviewed if multi-day booking is a required use case.
+3. Location Restriction Issue:
+   The system is allowing bookings in locations where the user does not have Flexi Booking access. Bookings should be restricted to the        user’s base work location as defined in the system.
+4. Booking history is not shown even after booking/ 
+5. After saying successfully processed, no` confirmation on that the requested seat has been booked
+
+
+Project2:
+FIT.Hitec chatbot issues.
+
+1. 	Status of all programs was not accurate – need to check
+      q: I need in detail progress of all the fit hitec markers in tablur format.
+2.	No. of theme leads questions is not correct – need to check
+      q:how many theme leads are part of fit.hitec
+
+
+
+
+
+4/7/2025
+
+project1.
+Arena APP:
+1. Unit testing all the uat bugs.
+2. Pushing latest code to internal repo.
+3. the ai service deployment to bosch network.
+
+
+
+Project2:
+FIT.Hitec chatbot
+
+1.getting the correct response for this 2 questions
+  How many theme leads are part of fit.hitec?
+  I need in detail progress of all the fit.hitec markers in tabular format
+
+
+
+
+
+
+9/7/2025:
+1. 
+
+
+
+
+
+
+
+
+
+
 llm = AzureChatOpenAI(
                     azure_deployment="GPTbgsw-openAIservice-Voiceseatbooking4",
                     api_key="2u2cSvJIlkFgj6BKsabPTVeIS4zcFlCu49yk2JxzrmUkIDTycp9qJQQJ99BHACYeBjFXJ3w3AAABACOGoOsh", 
