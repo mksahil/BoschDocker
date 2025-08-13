@@ -1,0 +1,530 @@
+{
+  "Ideas": [
+    {
+      "Id": 221,
+      "Title": "AI-Powered Contract Analysis Tool",
+      "Desc": "A software solution that uses AI to scan legal contracts, identify key clauses, potential risks, and non-standard terms, providing a summary for lawyers and business owners to expedite review."
+    },
+    {
+      "Id": 222,
+      "Title": "Subscription Box for International Snacks",
+      "Desc": "A monthly delivery service that brings a curated selection of unique and popular snacks and candies from a different country to your doorstep with each box."
+    },
+    {
+      "Id": 223,
+      "Title": "Personalized Children's Storybook Creator",
+      "Desc": "An online platform where parents can create custom storybooks for their children, personalizing the main character's name, appearance, and even including family members or pets in the narrative."
+    },
+    {
+      "Id": 224,
+      "Title": "Smart Bike Lock and GPS Tracker",
+      "Desc": "A keyless, durable bike lock that is controlled via a smartphone app. It includes tamper alerts, GPS tracking, and the ability to grant access to friends or family remotely."
+    },
+    {
+      "Id": 225,
+      "Title": "Virtual Event Planning and Hosting Platform",
+      "Desc": "An all-in-one platform for organizing and hosting engaging virtual and hybrid events, featuring customizable event spaces, networking tools, and interactive session capabilities."
+    },
+    {
+      "Id": 226,
+      "Title": "On-Demand Tech Support Service",
+      "Desc": "A service that provides immediate, remote tech support for individuals and small businesses, troubleshooting issues with computers, software, and home networks via chat or video call."
+    },
+    {
+      "Id": 227,
+      "Title": "Plant-Based Cheese Making Kits",
+      "Desc": "DIY kits that include all the necessary ingredients and instructions for making a variety of delicious, dairy-free cheeses at home, such as cashew-based mozzarella or almond-based ricotta."
+    },
+    {
+      "Id": 228,
+      "Title": "AI-Generated Music for Content Creators",
+      "Desc": "A platform that uses artificial intelligence to compose unique, royalty-free background music for videos, podcasts, and other digital content based on user-selected moods, genres, and durations."
+    },
+    {
+      "Id": 229,
+      "Title": "Secondhand Clothing Repair and Alteration Service",
+      "Desc": "A mail-in service that specializes in repairing and altering used clothing to extend its life, promoting sustainable fashion. Services include patching holes, replacing zippers, and tailoring for a perfect fit."
+    },
+    {
+      "Id": 230,
+      "Title": "Mobile Car Wash and Detailing Service",
+      "Desc": "A service that comes to the customer's home or office to provide professional car washing and detailing services, booked and managed through a simple mobile app."
+    },
+    {
+      "Id": 231,
+      "Title": "Interactive Historical Map Application",
+      "Desc": "A web and mobile app that allows users to explore historical maps of cities and regions, overlaying them with current maps and providing information about historical sites and events."
+    },
+    {
+      "Id": 232,
+      "Title": "Gourmet Mushroom Growing Kits",
+      "Desc": "Easy-to-use kits for growing a variety of gourmet mushrooms, such as oyster, shiitake, and lion's mane, indoors. The kits are organic and require minimal maintenance."
+    },
+    {
+      "Id": 233,
+      "Title": "Peer-to-Peer Storage Space Rental",
+      "Desc": "A marketplace that connects people with unused space in their homes (e.g., garages, attics, basements) to those in their community looking for affordable and convenient storage solutions."
+    },
+    {
+      "Id": 234,
+      "Title": "Personalized Vitamin and Supplement Packs",
+      "Desc": "A subscription service that delivers daily packs of vitamins and supplements tailored to an individual's health goals, diet, and lifestyle, based on an online assessment."
+    },
+    {
+      "Id": 235,
+      "Title": "Smart Mirror for Personalized Workouts",
+      "Desc": "An interactive mirror that streams live and on-demand fitness classes. It uses camera technology to provide real-time feedback on the user's form and posture."
+    },
+    {
+      "Id": 236,
+      "Title": "AI-Powered Recipe Generator from Leftovers",
+      "Desc": "A mobile app where users can input the ingredients they have on hand, and the AI generates creative and delicious recipes to help reduce food waste."
+    },
+    {
+      "Id": 237,
+      "Title": "Rental Service for High-End Camping and Outdoor Gear",
+      "Desc": "A service that allows people to rent premium camping equipment, from tents and sleeping bags to portable stoves and GPS devices, for their outdoor adventures."
+    },
+    {
+      "Id": 238,
+      "Title": "Local Artisan Craft Marketplace App",
+      "Desc": "A mobile platform focused on connecting local artisans and craftspeople directly with buyers in their community, facilitating the sale of handmade goods."
+    },
+    {
+      "Id": 239,
+      "Title": "Ethical and Conflict-Free Jewelry Brand",
+      "Desc": "A jewelry company that exclusively uses recycled metals and lab-grown or ethically sourced gemstones, providing full transparency on its supply chain."
+    },
+    {
+      "Id": 240,
+      "Title": "Dog Walking and Pet Sitting Cooperative",
+      "Desc": "A worker-owned cooperative of professional and insured pet sitters and dog walkers, offering reliable and loving care with profits shared among the members."
+    },
+    {
+      "Id": 241,
+      "Title": "AI-Driven Financial Planning and Investment App",
+      "Desc": "A mobile-first platform that uses AI to provide automated financial advice, manage investment portfolios (robo-advisor), and create long-term savings plans for users."
+    },
+    {
+      "Id": 242,
+      "Title": "Zero-Waste Bathroom Products Subscription",
+      "Desc": "A subscription box delivering eco-friendly bathroom essentials like solid shampoo bars, bamboo toothbrushes, and toothpaste tablets in plastic-free packaging."
+    },
+    {
+      "Id": 243,
+      "Title": "Virtual Reality Language Immersion",
+      "Desc": "A VR application that simulates real-world environments and conversations to help users practice a new language in an immersive and interactive way."
+    },
+    {
+      "Id": 244,
+      "Title": "Smart Air Purifier with Allergen Detection",
+      "Desc": "An advanced home air purifier that monitors air quality in real-time, specifically detects common allergens like pollen and pet dander, and adjusts its settings automatically."
+    },
+    {
+      "Id": 245,
+      "Title": "On-Demand Clothing Rental Service for Special Occasions",
+      "Desc": "A platform where users can rent designer dresses, suits, and accessories for events like weddings, galas, and parties, offering a sustainable alternative to single-use purchases."
+    },
+    {
+      "Id": 246,
+      "Title": "Personalized Scent Creation Lab",
+      "Desc": "An online and physical experience where customers can create their own unique perfume or cologne based on their preferences for different notes and accords, guided by a perfumer."
+    },
+    {
+      "Id": 247,
+      "Title": "Home Composting Service",
+      "Desc": "A subscription service that provides households with a composting bin and picks up food scraps weekly to be turned into nutrient-rich compost for local farms and gardens."
+    },
+    {
+      "Id": 248,
+      "Title": "Digital Detox Retreat Planning",
+      "Desc": "A travel company that organizes and curates retreats to serene, off-grid locations, designed to help people disconnect from technology and reconnect with nature and themselves."
+    },
+    {
+      "Id": 249,
+      "Title": "AI-Powered Meeting Transcription and Summarization Service",
+      "Desc": "A tool that records, transcribes, and uses AI to generate concise summaries and action items from virtual or in-person meetings, integrating with calendar and project management apps."
+    },
+    {
+      "Id": 250,
+      "Title": "Board Game Cafe with a Large Rental Library",
+      "Desc": "A cafe that offers a wide variety of board games for customers to play, along with food and drinks. It also features a library of games that can be rented to take home."
+    },
+    {
+      "Id": 251,
+      "Title": "Smart Baby Monitor with Sleep Pattern Analysis",
+      "Desc": "A baby monitor that uses a camera and sensors to track a baby's sleep patterns, breathing, and room conditions, providing parents with insights and alerts via a mobile app."
+    },
+    {
+      "Id": 252,
+      "Title": "Personalized Gift Curation Service",
+      "Desc": "A service where users describe the recipient and occasion, and expert curators assemble a unique and thoughtful gift box featuring items from small businesses and artisans."
+    },
+    {
+      "Id": 253,
+      "Title": "Urban Beekeeping Starter Kits and Workshops",
+      "Desc": "A business that sells all the necessary equipment for starting a beehive in a backyard or on a rooftop, and offers workshops to teach new beekeepers best practices."
+    },
+    {
+      "Id": 254,
+      "Title": "Augmented Reality History Tour App",
+      "Desc": "A mobile app that guides users through historical districts, using AR to overlay historical images and bring stories of the past to life on their smartphone screen."
+    },
+    {
+      "Id": 255,
+      "Title": "At-Home Escape Room Kits",
+      "Desc": "Themed kits that provide all the puzzles, clues, and props needed to set up an immersive escape room experience at home for family and friends."
+    },
+    {
+      "Id": 256,
+      "Title": "Local Food Swap Network",
+      "Desc": "An app and community platform that facilitates the swapping of homegrown produce, homemade baked goods, and other food items among neighbors to reduce waste and build community."
+    },
+    {
+      "Id": 257,
+      "Title": "AI-Powered Skincare Recommendation Engine",
+      "Desc": "A web platform where users can upload a photo and answer questions about their skin, and an AI algorithm analyzes the information to recommend a personalized skincare routine and products."
+    },
+    {
+      "Id": 258,
+      "Title": "Customizable Mechanical Keyboard Building Service",
+      "Desc": "An e-commerce site that allows enthusiasts to select every component of a mechanical keyboard (switches, keycaps, case, etc.) and have it professionally assembled and shipped."
+    },
+    {
+      "Id": 259,
+      "Title": "Mobile Bicycle Repair Service",
+      "Desc": "A van-equipped mobile workshop that can be booked to come to a cyclist's home or office to perform bike maintenance and repairs on the spot."
+    },
+    {
+      "Id": 260,
+      "Title": "Memory Box Curation Service",
+      "Desc": "A service that helps people organize, digitize, and preserve their physical memories (photos, letters, mementos) into beautifully curated physical or digital memory boxes."
+    },
+    {
+      "Id": 261,
+      "Title": "Noise-Cancelling Smart Windows",
+      "Desc": "Advanced window technology that can be retrofitted or installed to actively cancel out external noise, creating a quieter home or office environment."
+    },
+    {
+      "Id": 262,
+      "Title": "Fermentation Subscription Box (Kombucha, Kefir, Sourdough)",
+      "Desc": "A monthly kit that provides cultures, ingredients, and instructions for a new fermentation project, allowing hobbyists to easily make things like kombucha, kimchi, or sourdough bread."
+    },
+    {
+      "Id": 263,
+      "Title": "Gamified App for Learning to Code",
+      "Desc": "An application that teaches programming skills through a series of interactive challenges, puzzles, and projects, making the learning process engaging and fun for beginners."
+    },
+    {
+      "Id": 264,
+      "Title": "Portable Solar Panel and Power Bank Rental",
+      "Desc": "A service that rents out portable solar chargers and high-capacity power banks for camping, festivals, or emergency preparedness."
+    },
+    {
+      "Id": 265,
+      "Title": "Virtual Interior Design Consultation",
+      "Desc": "An online service that connects users with professional interior designers for consultations, mood board creation, and 3D renderings of their space, all done remotely."
+    },
+    {
+      "Id": 266,
+      "Title": "Skill-Sharing Platform for Seniors",
+      "Desc": "A community-based platform where retired seniors can offer workshops and one-on-one lessons to share their lifelong skills (e.g., woodworking, knitting, gardening) with younger generations."
+    },
+    {
+      "Id": 267,
+      "Title": "AI-Powered App for Identifying Plants and Plant Diseases",
+      "Desc": "A mobile app that allows users to take a picture of a plant or a leaf to instantly identify the species and diagnose any potential diseases or pest problems."
+    },
+    {
+      "Id": 268,
+      "Title": "Subscription Service for Children's Educational Toys",
+      "Desc": "A rental subscription service where families receive a curated box of age-appropriate, developmental, and educational toys each month, and can return them for a new set."
+    },
+    {
+      "Id": 269,
+      "Title": "Personalized Audiobook and Podcast Recommendation Service",
+      "Desc": "A platform that uses AI to analyze a user's listening habits and preferences to provide highly tailored recommendations for new audiobooks and podcasts."
+    },
+    {
+      "Id": 270,
+      "Title": "Modular, Expandable Tiny Home Kits",
+      "Desc": "A company that designs and sells kits for building tiny homes, featuring a modular design that allows owners to easily add more sections as their needs change."
+    },
+    {
+      "Id": 271,
+      "Title": "AI-Powered Accent Coaching App",
+      "Desc": "A mobile application that helps language learners reduce their accent by providing real-time analysis of their pronunciation, intonation, and rhythm, comparing it to native speakers."
+    },
+    {
+      "Id": 272,
+      "Title": "Customizable 3D Printed Jewelry",
+      "Desc": "An online platform where users can design their own unique pieces of jewelry using a simple 3D modeling interface, which are then 3D printed in various materials like sterling silver or resin."
+    },
+    {
+      "Id": 273,
+      "Title": "Smart Refrigerator Content Tracker",
+      "Desc": "A device or app that uses cameras and AI to identify the food items inside your refrigerator, track expiration dates, and suggest recipes based on what you have available."
+    },
+    {
+      "Id": 274,
+      "Title": "Subscription Box for Mindful Puzzles",
+      "Desc": "A curated monthly subscription service that delivers high-quality, aesthetically pleasing jigsaw puzzles designed to promote relaxation, mindfulness, and a break from screens."
+    },
+    {
+      "Id": 275,
+      "Title": "Virtual Reality Therapy for Phobias",
+      "Desc": "A therapeutic VR application that provides exposure therapy in a safe, controlled virtual environment for individuals suffering from phobias like fear of heights, flying, or public speaking."
+    },
+    {
+      "Id": 276,
+      "Title": "On-Demand Knife Sharpening Service",
+      "Desc": "A mail-in or local pickup service that professionally sharpens kitchen knives, scissors, and other household blades, returning them to peak condition."
+    },
+    {
+      "Id": 277,
+      "Title": "Refillable Cleaning Product Subscription",
+      "Desc": "A service that sends concentrated, eco-friendly cleaning product refills in minimal packaging, which customers then mix with water in reusable spray bottles."
+    },
+    {
+      "Id": 278,
+      "Title": "AI-Powered App for Identifying Bird Songs",
+      "Desc": "A mobile application that can listen to and identify bird species in real-time based on their calls and songs, acting as a 'Shazam for birds'."
+    },
+    {
+      "Id": 279,
+      "Title": "Personalized Pet Portrait Service",
+      "Desc": "An e-commerce service where customers upload photos of their pets, and artists create custom portraits in various styles, from realistic oil paintings to modern digital illustrations."
+    },
+    {
+      "Id": 280,
+      "Title": "Mobile App for Finding and Booking Local Sports Facilities",
+      "Desc": "A platform that allows users to find, book, and pay for time at local sports venues like tennis courts, basketball courts, and soccer fields."
+    },
+    {
+      "Id": 281,
+      "Title": "DIY Hot Sauce Making Kit",
+      "Desc": "A kit containing a variety of chili peppers, spices, bottles, and instructions for enthusiasts to create and experiment with their own unique hot sauce recipes at home."
+    },
+    {
+      "Id": 282,
+      "Title": "Local Adventure Subscription for Couples",
+      "Desc": "A subscription service that plans and books a surprise date or local adventure for couples each month, based on their shared interests and budget."
+    },
+    {
+      "Id": 283,
+      "Title": "AI-Powered Garden Planning and Management App",
+      "Desc": "An app that helps users design their garden layout based on their climate and space, provides planting schedules, and sends reminders for watering and pest control."
+    },
+    {
+      "Id": 284,
+      "Title": "Smart Dog Collar with Health and Activity Tracking",
+      "Desc": "A collar that monitors a dog's activity levels, sleep quality, and location via GPS, and provides health insights to the owner through a connected mobile app."
+    },
+    {
+      "Id": 285,
+      "Title": "Ethical and Sustainable Workwear Brand",
+      "Desc": "A clothing brand focused on creating stylish, durable, and comfortable professional attire for men and women using sustainable materials and ethical manufacturing processes."
+    },
+    {
+      "Id": 286,
+      "Title": "Interactive Storytelling App for Children",
+      "Desc": "A mobile app featuring 'choose your own adventure' style stories where children's choices affect the narrative and outcome, promoting reading and decision-making skills."
+    },
+    {
+      "Id": 287,
+      "Title": "At-Home Pottery Kits with Online Tutorials",
+      "Desc": "Kits that provide clay, tools, and glazes for creating pottery at home, supplemented with online video tutorials for various techniques and projects."
+    },
+    {
+      "Id": 288,
+      "Title": "Platform for Exchanging Leftover Foreign Currency",
+      "Desc": "A peer-to-peer platform where travelers can exchange small amounts of leftover foreign currency with other travelers, avoiding poor exchange rates at airports."
+    },
+    {
+      "Id": 289,
+      "Title": "AI-Powered Dream Journal and Analyzer",
+      "Desc": "An app where users can record their dreams (via text or voice), and an AI helps to identify recurring themes, symbols, and patterns over time."
+    },
+    {
+      "Id": 290,
+      "Title": "Luxury Picnic Setup Service",
+      "Desc": "A service that provides a complete, high-end picnic experience at a chosen location, including a beautifully styled setup with blankets, pillows, a curated food basket, and cleanup."
+    },
+    {
+      "Id": 291,
+      "Title": "Modular and Customizable Cat Furniture",
+      "Desc": "A system of interconnected shelves, scratching posts, and condos that cat owners can design and build to create a custom climbing structure that fits their space."
+    },
+    {
+      "Id": 292,
+      "Title": "Meal Kit Service for People with Specific Dietary Needs",
+      "Desc": "A specialized meal kit delivery service catering to diets like low-FODMAP, autoimmune protocol (AIP), or ketogenic, with recipes developed by nutritionists."
+    },
+    {
+      "Id": 293,
+      "Title": "Smart Water Leak Detector System",
+      "Desc": "A system of small, Wi-Fi-enabled sensors that can be placed near pipes, sinks, and appliances to detect leaks early and send an alert to the homeowner's phone."
+    },
+    {
+      "Id": 294,
+      "Title": "Personalized Songwriting Service",
+      "Desc": "A service where musicians and songwriters create a custom, professionally produced song for a special occasion based on a customer's stories and memories."
+    },
+    {
+      "Id": 295,
+      "Title": "Online Marketplace for Upcycled and Salvaged Building Materials",
+      "Desc": "A platform connecting people who are demolishing or renovating with those looking for unique, reclaimed building materials like vintage doors, hardwood flooring, and light fixtures."
+    },
+    {
+      "Id": 296,
+      "Title": "AI-Powered Text Summarizer for Students and Researchers",
+      "Desc": "A tool that uses natural language processing to condense long articles, papers, and documents into concise summaries, highlighting the key points and arguments."
+    },
+    {
+      "Id": 297,
+      "Title": "Mobile App for Finding and Joining Pickup Sports Games",
+      "Desc": "An app that helps users find and join casual, pickup sports games happening in their area, or create their own games and invite others."
+    },
+    {
+      "Id": 298,
+      "Title": "Subscription Box for Non-Alcoholic Craft Beverages",
+      "Desc": "A monthly box featuring a curated selection of artisanal non-alcoholic drinks, such as craft sodas, mocktail ingredients, and alcohol-free spirits."
+    },
+    {
+      "Id": 299,
+      "Title": "Repair Cafe Event Organization Service",
+      "Desc": "A service that helps communities organize 'Repair Cafe' events, where volunteers with repair skills help others fix broken items like electronics, clothing, and small appliances for free."
+    },
+    {
+      "Id": 300,
+      "Title": "Virtual Reality Museum and Art Gallery Tours",
+      "Desc": "An application offering immersive, high-definition virtual tours of famous museums and art galleries from around the world, complete with guided narration and interactive exhibits."
+    },
+    {
+      "Id": 301,
+      "Title": "Smart Posture Corrector Device",
+      "Desc": "A small, wearable device that gently vibrates to remind the user to sit or stand up straight whenever it detects them slouching."
+    },
+    {
+      "Id": 302,
+      "Title": "Personalized Comic Book Creation Service",
+      "Desc": "A service where customers provide a story or theme, and artists create a short, personalized comic book starring them, their friends, or family."
+    },
+    {
+      "Id": 303,
+      "Title": "Local Farm-to-Table Meal Delivery Service",
+      "Desc": "A service that partners with local farms to create and deliver fully prepared, fresh meals, with a menu that changes weekly based on seasonal availability."
+    },
+    {
+      "Id": 304,
+      "Title": "AI-Powered Personal Finance Coach",
+      "Desc": "An app that acts as a virtual financial coach, analyzing spending habits, helping to create a budget, and providing proactive tips and encouragement to reach financial goals."
+    },
+    {
+      "Id": 305,
+      "Title": "Subscription Box for Ethically Sourced Teas",
+      "Desc": "A monthly delivery of premium, loose-leaf teas sourced from small, sustainable tea gardens around the world, complete with tasting notes and brewing instructions."
+    },
+    {
+      "Id": 306,
+      "Title": "On-Demand Language Interpretation App",
+      "Desc": "A mobile app that provides instant access to live, professional interpreters for various languages via video or audio call, useful for travelers, businesses, and healthcare."
+    },
+    {
+      "Id": 307,
+      "Title": "Digital Wardrobe Organization App",
+      "Desc": "An app that allows users to digitize their wardrobe by uploading photos of their clothes, helping them to plan outfits, pack for trips, and identify what they wear most."
+    },
+    {
+      "Id": 308,
+      "Title": "Urban Foraging and Wild Food Workshops",
+      "Desc": "Guided tours and workshops that teach people how to safely identify and harvest edible wild plants, mushrooms, and fruits growing in their local urban environment."
+    },
+    {
+      "Id": 309,
+      "Title": "Smart Home Scent Diffuser",
+      "Desc": "A Wi-Fi connected essential oil diffuser that can be controlled via a mobile app, allowing users to schedule scent diffusion, adjust intensity, and create custom aroma blends."
+    },
+    {
+      "Id": 310,
+      "Title": "Platform for Renting Out Personal Vehicles (Peer-to-Peer Car Sharing)",
+      "Desc": "A marketplace that allows car owners to rent out their personal vehicles to pre-screened individuals, providing a source of passive income."
+    },
+    {
+      "Id": 311,
+      "Title": "AI-Powered App for Solving Complex Math Problems",
+      "Desc": "An educational app that allows students to take a picture of a math problem, and then provides a step-by-step solution and explanation of the underlying concepts."
+    },
+    {
+      "Id": 312,
+      "Title": "Customizable Board Game Design Service",
+      "Desc": "A service where customers can work with game designers to create a completely custom board game for a special event, like a wedding or corporate retreat."
+    },
+    {
+      "Id": 313,
+      "Title": "Aquaponics Starter Kits for Home Use",
+      "Desc": "Kits that provide a small-scale, closed-loop ecosystem where fish and plants are grown together. The fish waste provides nutrients for the plants, which in turn clean the water for the fish."
+    },
+    {
+      "Id": 314,
+      "Title": "Noise-Monitoring and Complaint Logging Service for Apartments",
+      "Desc": "A service that provides residents with a certified device to log noise levels and a platform to discreetly report disturbances to building management with timestamped data."
+    },
+    {
+      "Id": 315,
+      "Title": "Gamified App for Learning Musical Instruments",
+      "Desc": "An app that listens to you play an instrument like a guitar or piano and provides real-time feedback, turning lessons and practice into an interactive game."
+    },
+    {
+      "Id": 316,
+      "Title": "On-Demand Babysitting App with Vetted Sitters",
+      "Desc": "A mobile platform that connects parents with thoroughly vetted, background-checked, and parent-rated babysitters for on-demand or scheduled childcare."
+    },
+    {
+      "Id": 317,
+      "Title": "Subscription Box for Historical Letters",
+      "Desc": "A service that sends subscribers a weekly or monthly replica of a fascinating historical letter, complete with context and a transcript, bringing history to life."
+    },
+    {
+      "Id": 318,
+      "Title": "Personalized Running and Workout Route Planner",
+      "Desc": "An app that generates custom running, walking, or cycling routes based on a user's desired distance, elevation preference, and safety considerations like well-lit streets."
+    },
+    {
+      "Id": 319,
+      "Title": "Mobile Tire Change and Repair Service",
+      "Desc": "A service where a technician comes to your location to change seasonal tires, repair flats, or install new tires, saving you a trip to the garage."
+    },
+    {
+      "Id": 320,
+      "Title": "Platform for Co-owning Vacation Properties",
+      "Desc": "A tech platform that facilitates the co-ownership of vacation homes, handling legal, scheduling, and financial aspects to make it easier and more affordable for small groups to own a second home."
+    },
+
+    {
+      "Id": 401,
+      "Title": "Smart Scooter Lock with GPS",
+      "Desc": "A smartphone-controlled scooter lock with GPS tracking, tamper detection, and remote access sharing for friends and family."
+    },
+    {
+      "Id": 402,
+      "Title": "App-Controlled Bike Lock",
+      "Desc": "A Bluetooth-enabled bike lock operated through a mobile app, featuring theft alerts, live location tracking, and the option to share unlock access."
+    },
+    {
+      "Id": 403,
+      "Title": "Connected Motorcycle Security System",
+      "Desc": "A rugged motorcycle lock with GPS tracking, vibration detection, and app-based access control, allowing remote unlock and location monitoring."
+    },
+    {
+      "Id": 404,
+      "Title": "E-Bike Smart Lock and Tracker",
+      "Desc": "A weatherproof smart lock for e-bikes with GPS location tracking, real-time tamper alerts, and the ability to grant temporary access codes."
+    },
+    {
+      "Id": 405,
+      "Title": "IoT-Based Bicycle Theft Prevention System",
+      "Desc": "An internet-connected bike security device with GPS tracking, tamper alarms, and app-based remote lock/unlock features."
+    }
+  ]
+}
