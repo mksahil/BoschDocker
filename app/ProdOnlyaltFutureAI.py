@@ -18,7 +18,7 @@ from langchain.vectorstores import Chroma
 from langgraph.graph import StateGraph, END
 import chromadb
 
-
+https://altfutureai-ajfdb2azecbpfnax.eastus-01.azurewebsites.net/docs
 # ==============================================================================
 # 1. CONFIGURATION & CONSTANTS
 # ==============================================================================
