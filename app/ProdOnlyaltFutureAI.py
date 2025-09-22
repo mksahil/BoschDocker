@@ -25,10 +25,9 @@ import chromadb
 
 # --- Load Environment Variables ---
 
-
 # --- ChromaDB Configuration ---
 CHROMA_PERSIST_DIR = "idea_vector_store"
-COLLECTION_NAME = "ideas_v3" # Changed version to avoid conflicts
+COLLECTION_NAME = "ideas_v3"
 
 # --- LangGraph Agent Configuration ---
 CANDIDATE_POOL_SIZE = 50
@@ -44,11 +43,24 @@ EXCLUDED_STATUSES_S0_IC1 = [5]     # Excluded statuses when source=0 and IsChild
 # ==============================================================================
 
 class IdeaItem(BaseModel):
+    """Model for a complete Idea, used for creation and matching."""
     Id: int
     Title: str
     Description: str
     IdeaStatus: int
     IsChildIdea: bool
+
+# --- NEW: Pydantic model for partial updates ---
+class IdeaUpdateItem(BaseModel):
+    """
+    Model for updating an existing idea. Only the 'Id' is required.
+    All other fields are optional and will only be updated if provided.
+    """
+    Id: int
+    Title: Optional[str] = None
+    Description: Optional[str] = None
+    IdeaStatus: Optional[int] = None
+    IsChildIdea: Optional[bool] = None
 
 class MatchedIdea(BaseModel):
     IdeaId: int
@@ -61,11 +73,11 @@ class AddIdeasRequest(BaseModel):
 class AddIdeasResponse(BaseModel):
     Message: str
     IdsAdded: List[int]
-    IdsSkipped: List[int] # --- NEW: Field to report IDs that already existed
+    IdsSkipped: List[int]
 
-# --- NEW: Pydantic models for the update endpoint ---
+# --- MODIFIED: UpdateIdeasRequest now uses the new partial update model ---
 class UpdateIdeasRequest(BaseModel):
-    Ideas: List[IdeaItem]
+    Ideas: List[IdeaUpdateItem]
 
 class UpdateIdeasResponse(BaseModel):
     Message: str
@@ -135,6 +147,7 @@ llm = AzureChatOpenAI(
 )
 
 chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+
 vector_store = Chroma(
     client=chroma_client,
     collection_name=COLLECTION_NAME,
@@ -161,6 +174,7 @@ def create_embedding_node(state: AgentState) -> AgentState:
         state["error_message"] = f"Failed to create embedding: {str(e)}"
         state["current_step"] = "error"
         return state
+
 def vector_search_node(state: AgentState) -> AgentState:
     try:
         print("Performing vector similarity search with dynamic business logic filters")
@@ -175,22 +189,21 @@ def vector_search_node(state: AgentState) -> AgentState:
         conditions = []
         print(f"Building filter for source={source}, new_idea.is_child={is_child_idea_of_new}")
 
-        # Business Rule 1: source=false - Include ALL ideas with ALL statuses, including child ideas
         if source is False:
             print("Rule Applied: source=false, including ALL ideas with ALL statuses and ALL child ideas")
-            # No filters needed - include everything
             
-        # Business Rule 2: source=true - Only approved ideas (status 4+) with IsChildIdea=0, exclude child ideas
         elif source is True:
-            # Only include ideas with status >= 4 (approved)
             conditions.append({"IdeaStatus": {"$gte": 4}})
             print("Rule Applied: source=true, including only approved ideas (status >= 4)")
             
-            # Exclude child ideas (only include parent ideas where IsChildIdea=0)
-            conditions.append({"IsChildIdea": {"$eq": 0}})  # Changed from False to 0 for consistency
-            print("Rule Applied: source=true, excluding all child ideas (IsChildIdea must be 0)")
+            conditions.append({
+                "$or": [
+                    {"IsChildIdea": {"$eq": False}},
+                    {"IsChildIdea": {"$eq": 0}}
+                ]
+            })
+            print("Rule Applied: source=true, including only parent ideas (IsChildIdea=false or 0)")
 
-        # Build the final filter
         metadata_filter = None
         if len(conditions) > 1:
             metadata_filter = {"$and": conditions}
@@ -202,21 +215,23 @@ def vector_search_node(state: AgentState) -> AgentState:
         print(f"Final metadata filter for ChromaDB: {metadata_filter}")
 
         fetch_count = min(CANDIDATE_POOL_SIZE, state["top_k"] * 3)
-
         search_kwargs = {"k": fetch_count}
         if metadata_filter:
             search_kwargs["filter"] = metadata_filter
 
+        print(f"ChromaDB search parameters: {search_kwargs}")
         results_with_scores = vector_store.similarity_search_by_vector_with_relevance_scores(
             state["query_embedding"],
             **search_kwargs
         )
+        print(f"Raw ChromaDB results count: {len(results_with_scores)}")
 
         candidates = []
         for doc, score in results_with_scores:
             try:
                 similarity_percent = int((1 - score) * 100)
                 metadata = doc.metadata
+                print(f"Result - ID: {metadata.get('id')}, Status: {metadata.get('IdeaStatus')}, IsChild: {metadata.get('IsChildIdea')}, Score: {similarity_percent}%")
                 candidates.append({
                     'idea_id': metadata.get('id', 0),
                     'title': metadata.get('title', ''),
@@ -233,14 +248,6 @@ def vector_search_node(state: AgentState) -> AgentState:
         state["vector_candidates"] = candidates
         state["current_step"] = "vector_search_completed"
         print(f"Found {len(candidates)} vector candidates after dynamic filtering")
-        
-        # Debug: Print summary of what was included
-        if candidates:
-            statuses = [c.get('idea_status', 'Unknown') for c in candidates]
-            child_flags = [c.get('is_child_idea', 'Unknown') for c in candidates]
-            print(f"Debug - Included statuses: {set(statuses)}")
-            print(f"Debug - Child idea flags: {set(child_flags)}")
-        
         return state
         
     except Exception as e:
@@ -249,7 +256,6 @@ def vector_search_node(state: AgentState) -> AgentState:
         state["error_message"] = f"Vector search failed: {str(e)}"
         state["current_step"] = "error"
         return state
-
 
 def llm_reranking_node(state: AgentState) -> AgentState:
     try:
@@ -347,7 +353,7 @@ similarity_agent = create_idea_similarity_agent()
 
 app = FastAPI(
     title="AI Agent-Based Idea Similarity API",
-    version="3.4", # --- MODIFIED: Incremented version number
+    version="3.5", # --- MODIFIED: Incremented version number
     description="An intelligent agent for finding conceptually similar ideas, with dynamic business logic filtering."
 )
 
@@ -359,7 +365,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- MODIFIED: Updated add_ideas to perform ADD-ONLY logic ---
 @app.post("/addIdeas", response_model=AddIdeasResponse)
 async def add_ideas(request: AddIdeasRequest):
     """
@@ -372,7 +377,6 @@ async def add_ideas(request: AddIdeasRequest):
         ids_to_add = []
         ids_skipped = []
         
-        # Check for existing ideas before attempting to add
         all_ids_in_request = [str(idea.Id) for idea in request.Ideas]
         existing_docs = vector_store.get(ids=all_ids_in_request)
         existing_ids = set(map(int, existing_docs['ids']))
@@ -409,45 +413,71 @@ async def add_ideas(request: AddIdeasRequest):
         print(f"Error adding ideas: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to add ideas: {str(e)}")
 
-# --- NEW: Endpoint to update metadata for existing ideas ---
+# --- MODIFIED: Endpoint logic completely rewritten for partial updates ---
 @app.put("/updateIdeasMetadata", response_model=UpdateIdeasResponse)
 async def update_ideas_metadata(request: UpdateIdeasRequest):
     """
-    Updates the content and metadata for existing ideas in the vector store.
-    The embedding will be re-calculated if the Title or Description changes.
-    If an idea 'Id' is not found, it will be reported and skipped.
+    Updates the content and/or metadata for existing ideas in the vector store.
+    Only provided fields will be updated. The embedding will be re-calculated
+    if the Title or Description changes. If an idea 'Id' is not found,
+    it will be reported and skipped.
     """
     try:
         ids_updated = []
         ids_not_found = []
+        docs_to_update = []
+        ids_to_update_str = []
 
-        for idea in request.Ideas:
-            # First, check if the document exists. update_document doesn't provide this feedback.
-            existing_doc = vector_store.get(ids=[str(idea.Id)])
-            if not existing_doc['ids']:
-                ids_not_found.append(idea.Id)
+        # Fetch all documents at once for efficiency
+        all_ids_to_check = [str(idea.Id) for idea in request.Ideas]
+        existing_docs_map = {
+            doc['ids'][i]: {
+                "metadata": doc['metadatas'][i],
+                "document": doc['documents'][i]
+            }
+            for doc in [vector_store.get(ids=all_ids_to_check, include=["metadatas", "documents"])]
+            for i in range(len(doc['ids']))
+        }
+
+
+        for idea_update in request.Ideas:
+            idea_id_str = str(idea_update.Id)
+            
+            if idea_id_str not in existing_docs_map:
+                ids_not_found.append(idea_update.Id)
                 continue
 
-            # If it exists, create the updated document and update it
-            updated_doc = Document(
-                page_content=f"{idea.Title}. {idea.Description}",
-                metadata={
-                    "id": idea.Id,
-                    "title": idea.Title,
-                    "description": idea.Description,
-                    "IdeaStatus": idea.IdeaStatus,
-                    "IsChildIdea": idea.IsChildIdea
-                }
-            )
-            # Langchain Chroma's `update_document` is a bit hidden.
-            # The underlying client's `update` or `upsert` is better.
-            # Here we use `add_documents` with existing IDs which acts as an upsert.
-            # This is the most reliable method with the LangChain wrapper.
-            vector_store.add_documents(documents=[updated_doc], ids=[str(idea.Id)])
-            ids_updated.append(idea.Id)
+            # Start with the existing data
+            old_data = existing_docs_map[idea_id_str]
+            updated_metadata = old_data["metadata"].copy()
+            
+            # Merge new data: update only if the new value is not None
+            if idea_update.Title is not None:
+                updated_metadata['title'] = idea_update.Title
+            if idea_update.Description is not None:
+                updated_metadata['description'] = idea_update.Description
+            if idea_update.IdeaStatus is not None:
+                updated_metadata['IdeaStatus'] = idea_update.IdeaStatus
+            if idea_update.IsChildIdea is not None:
+                updated_metadata['IsChildIdea'] = idea_update.IsChildIdea
+            
+            # Reconstruct the page content for embedding
+            new_page_content = f"{updated_metadata['title']}. {updated_metadata['description']}"
 
-        print(f"Updated {len(ids_updated)} documents. Not found: {len(ids_not_found)} documents.")
-        
+            # Create the updated document
+            updated_doc = Document(
+                page_content=new_page_content,
+                metadata=updated_metadata
+            )
+            docs_to_update.append(updated_doc)
+            ids_to_update_str.append(idea_id_str)
+            ids_updated.append(idea_update.Id)
+
+        # Perform a single batch update
+        if docs_to_update:
+            vector_store.add_documents(documents=docs_to_update, ids=ids_to_update_str)
+            print(f"Batch updated {len(docs_to_update)} documents.")
+
         message = f"Successfully processed request. Updated {len(ids_updated)} ideas. Could not find {len(ids_not_found)} ideas."
         return UpdateIdeasResponse(
             Message=message,
@@ -456,6 +486,7 @@ async def update_ideas_metadata(request: UpdateIdeasRequest):
         )
     except Exception as e:
         print(f"Error updating ideas metadata: {str(e)}")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to update ideas: {str(e)}")
 
 @app.delete("/deleteIdeas", response_model=DeleteIdeasResponse)
@@ -463,13 +494,9 @@ async def delete_ideas(request: DeleteIdeasRequest):
     try:
         if not request.Ids:
             return DeleteIdeasResponse(Message="No IDs provided for deletion.", IdsDeleted=[])
-
-        # Convert IDs to string for ChromaDB
+        
         ids_to_delete = [str(id_val) for id_val in request.Ids]
-        
-        # This is the correct way to delete from Chroma
         vector_store.delete(ids=ids_to_delete)
-        
         print(f"Deletion request processed for IDs: {request.Ids}")
 
         return DeleteIdeasResponse(
@@ -502,30 +529,23 @@ async def match_ideas(request: MatchRequest):
 
         if final_state.get("error_message"):
             return MatchResponse(
-                IsSuccess=False,
-                Message="FAILED",
-                ErrorMessage=final_state["error_message"],
-                MatchedIdeasCount=0,
-                MatchedIdeas=[]
+                IsSuccess=False, Message="FAILED", ErrorMessage=final_state["error_message"],
+                MatchedIdeasCount=0, MatchedIdeas=[]
             )
 
         all_matches_from_agent = final_state.get("final_matches", [])
-
         filtered_matches = [
             match for match in all_matches_from_agent
             if match.SimilarityPercent >= request.MinSimilarity
         ]
-
         final_results = filtered_matches[:request.TopK]
 
         print(f"Agent returned {len(all_matches_from_agent)} potential matches.")
         print(f"Returning {len(final_results)} matches after filtering for similarity >= {request.MinSimilarity}% and applying TopK limit.")
 
         return MatchResponse(
-            IsSuccess=True,
-            Message="SUCCESS",
-            MatchedIdeasCount=len(final_results),
-            MatchedIdeas=final_results
+            IsSuccess=True, Message="SUCCESS",
+            MatchedIdeasCount=len(final_results), MatchedIdeas=final_results
         )
 
     except Exception as e:
@@ -533,11 +553,8 @@ async def match_ideas(request: MatchRequest):
         print(f"Error in match_ideas: {error_msg}")
         print(traceback.format_exc())
         return MatchResponse(
-            IsSuccess=False,
-            Message="FAILED",
-            ErrorMessage=error_msg,
-            MatchedIdeasCount=0,
-            MatchedIdeas=[]
+            IsSuccess=False, Message="FAILED", ErrorMessage=error_msg,
+            MatchedIdeasCount=0, MatchedIdeas=[]
         )
 
 @app.get("/health")
@@ -548,15 +565,17 @@ async def health_check():
 async def root():
     return {
         "message": "AI Agent-Based Idea Similarity API",
-        "version": "3.4", # --- MODIFIED: Incremented version
+        "version": "3.5", # --- MODIFIED: Incremented version
         "endpoints": {
             "add_new_ideas": "POST /addIdeas",
-            "update_existing_ideas": "PUT /updateIdeasMetadata", # --- NEW
+            "update_existing_ideas": "PUT /updateIdeasMetadata",
             "delete_ideas": "DELETE /deleteIdeas",
             "match_ideas": "POST /findMatches",
             "health": "GET /health"
         }
     }
 
+# This check is useful for running the script directly
+if __name__ == "__main__":
     print("Starting AI Agent-Based Idea Similarity API...")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
