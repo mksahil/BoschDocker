@@ -1,0 +1,221 @@
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse
+import whisper
+import tempfile
+import os
+import shutil
+from typing import Optional
+import logging
+from pydantic import BaseModel
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Voice-to-Text API",
+    description="Convert audio recordings to text using OpenAI Whisper",
+    version="1.0.0"
+)
+
+# Response model
+class TranscriptionResponse(BaseModel):
+    text: str
+    language: Optional[str] = None
+    confidence: Optional[float] = None
+
+# Load Whisper model (you can change model size: tiny, base, small, medium, large)
+MODEL_SIZE = "base"  # Good balance between speed and accuracy
+model = None
+
+@app.on_event("startup")
+async def load_model():
+    """Load Whisper model on startup"""
+    global model
+    try:
+        logger.info(f"Loading Whisper model: {MODEL_SIZE}")
+        model = whisper.load_model(MODEL_SIZE)
+        logger.info("Whisper model loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load Whisper model: {e}")
+        raise e
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {"message": "Voice-to-Text API is running", "model": MODEL_SIZE}
+
+@app.post("/transcribe", response_model=TranscriptionResponse)
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    language: Optional[str] = None
+):
+    """
+    Transcribe audio file to text
+    
+    Args:
+        file: Audio file (supported formats: mp3, mp4, wav, m4a, etc.)
+        language: Optional language code (e.g., 'en', 'es', 'fr')
+    
+    Returns:
+        TranscriptionResponse with transcribed text
+    """
+    if model is None:
+        raise HTTPException(status_code=500, detail="Whisper model not loaded")
+    
+    # Check file size (limit to 25MB)
+    if file.size > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 25MB")
+    
+    # Supported audio formats
+    supported_formats = {'.mp3', '.mp4', '.wav', '.m4a', '.flac', '.webm', '.ogg'}
+    file_extension = os.path.splitext(file.filename.lower())[1]
+    
+    if file_extension not in supported_formats:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Unsupported file format. Supported formats: {', '.join(supported_formats)}"
+        )
+    
+    # Create temporary file
+    temp_file = None
+    try:
+        # Save uploaded file to temporary location
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
+            shutil.copyfileobj(file.file, temp_file)
+            temp_file_path = temp_file.name
+        
+        logger.info(f"Processing file: {file.filename}")
+        
+        # Transcribe audio using Whisper
+        transcribe_options = {}
+        if language:
+            transcribe_options['language'] = language
+            
+        result = model.transcribe(temp_file_path, **transcribe_options)
+        
+        # Extract transcription details
+        transcribed_text = result["text"].strip()
+        detected_language = result.get("language")
+        
+        # Calculate average confidence if segments are available
+        confidence = None
+        if "segments" in result and result["segments"]:
+            confidences = []
+            for segment in result["segments"]:
+                if "no_speech_prob" in segment:
+                    # Convert no_speech_prob to confidence (inverse)
+                    conf = 1 - segment["no_speech_prob"]
+                    confidences.append(conf)
+            
+            if confidences:
+                confidence = sum(confidences) / len(confidences)
+        
+        logger.info(f"Transcription completed. Language: {detected_language}")
+        
+        return TranscriptionResponse(
+            text=transcribed_text,
+            language=detected_language,
+            confidence=confidence
+        )
+        
+    except Exception as e:
+        logger.error(f"Error during transcription: {e}")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+    
+    finally:
+        # Clean up temporary file
+        if temp_file and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except Exception as e:
+                logger.warning(f"Failed to delete temporary file: {e}")
+
+@app.post("/transcribe-with-timestamps")
+async def transcribe_with_timestamps(
+    file: UploadFile = File(...),
+    language: Optional[str] = None
+):
+    """
+    Transcribe audio file to text with timestamps
+    
+    Args:
+        file: Audio file
+        language: Optional language code
+        
+    Returns:
+        Transcription with word-level timestamps
+    """
+    if model is None:
+        raise HTTPException(status_code=500, detail="Whisper model not loaded")
+    
+    # Same validation as transcribe endpoint
+    if file.size > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 25MB")
+    
+    supported_formats = {'.mp3', '.mp4', '.wav', '.m4a', '.flac', '.webm', '.ogg'}
+    file_extension = os.path.splitext(file.filename.lower())[1]
+    
+    if file_extension not in supported_formats:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Unsupported file format. Supported formats: {', '.join(supported_formats)}"
+        )
+    
+    temp_file = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
+            shutil.copyfileobj(file.file, temp_file)
+            temp_file_path = temp_file.name
+        
+        # Transcribe with word timestamps
+        transcribe_options = {"word_timestamps": True}
+        if language:
+            transcribe_options['language'] = language
+            
+        result = model.transcribe(temp_file_path, **transcribe_options)
+        
+        # Format response with segments and timestamps
+        segments = []
+        for segment in result.get("segments", []):
+            segment_data = {
+                "start": segment["start"],
+                "end": segment["end"],
+                "text": segment["text"].strip()
+            }
+            
+            # Add word-level timestamps if available
+            if "words" in segment:
+                segment_data["words"] = [
+                    {
+                        "word": word["word"],
+                        "start": word["start"],
+                        "end": word["end"],
+                        "probability": word.get("probability", 0.0)
+                    }
+                    for word in segment["words"]
+                ]
+            
+            segments.append(segment_data)
+        
+        return {
+            "text": result["text"].strip(),
+            "language": result.get("language"),
+            "segments": segments
+        }
+        
+    except Exception as e:
+        logger.error(f"Error during transcription with timestamps: {e}")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+    
+    finally:
+        if temp_file and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except Exception as e:
+                logger.warning(f"Failed to delete temporary file: {e}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
