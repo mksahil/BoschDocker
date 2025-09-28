@@ -29,8 +29,12 @@ from azure.search.documents.models import VectorizedQuery
 
 # --- Load Environment Variables ---
 # NOTE: Make sure these are set in your App Service configuration
-AZURE_AI_SEARCH_ENDPOINT = os.environ["AZURE_AI_SEARCH_ENDPOINT"]
-AZURE_AI_SEARCH_API_KEY = os.environ["AZURE_AI_SEARCH_API_KEY"]
+# AZURE_AI_SEARCH_ENDPOINT = os.environ["AZURE_AI_SEARCH_ENDPOINT"]
+# AZURE_AI_SEARCH_API_KEY = os.environ["AZURE_AI_SEARCH_API_KEY"]
+# AZURE_AI_SEARCH_INDEX_NAME = os.environ.get("AZURE_AI_SEARCH_INDEX_NAME", "ideas-index-v1")
+
+AZURE_AI_SEARCH_ENDPOINT = "https://qaazuresearchservice.search.windows.net"
+AZURE_AI_SEARCH_API_KEY = "GoGdunGrhCeLPpdaRPmpaAHSQdOqrOlHZvrOPNHGyBAzSeAkvqx0"
 AZURE_AI_SEARCH_INDEX_NAME = os.environ.get("AZURE_AI_SEARCH_INDEX_NAME", "ideas-index-v1")
 
 
