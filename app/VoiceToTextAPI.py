@@ -6,6 +6,10 @@
 # pydantic
 
 
+https://mkath-mg864og9-eastus2.cognitiveservices.azure.com/openai/deployments/whisper/audio/translations?api-version=2024-06-01
+
+2VIl3HDEyhuS9qKtVTCJLjXiVtp3igN3EzjUYX0p2XnXdL3Y0wh4JQQJ99BJACHYHv6XJ3w3AAAAACOGvHKd
+
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 import whisper
