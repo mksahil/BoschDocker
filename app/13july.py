@@ -10,6 +10,11 @@ from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel
 import requests
 
+RUN apt-get update && \
+    apt-get install -y ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+
 # FastAPI App Initialization
 app = FastAPI(title="Agile Arena Bosch Chatbot API", version="prod3") # Version updated for all fixes
 
