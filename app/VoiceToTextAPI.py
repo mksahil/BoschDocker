@@ -7,10 +7,9 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Azure Speech-to-Text API")
 
-# Azure Speech API configuration
-AZURE_ENDPOINT = "https://ai-mkathewadi6647ai316946011207.cognitiveservices.azure.com/speechtotext/transcriptions:transcribe"
-AZURE_API_KEY = "APg2QKU60WPTHvisLTEWDXkUW0zXFo1gg7J8NAaHHf047AYpcSezJQQJ99BBACYeBjFXJ3w3AAAAACOGRDfy"
-API_VERSION = "2025-10-15"
+AZURE_ENDPOINT = "https://bgsw-openaiservice-voiceseatbooking-p-eus-001.cognitiveservices.azure.com/speechtotext/transcriptions:transcribe"
+AZURE_API_KEY = "2u2cSvJIlkFgj6BKsabPTVeIS4zcFlCu49yk2JxzrmUkIDTycp9qJQQJ99BHACYeBjFXJ3w3AAABACOGoOsh"
+API_VERSION = "2024-11-15"
 
 
 class TranscriptionResponse(BaseModel):
